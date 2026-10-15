@@ -922,6 +922,9 @@ export class Lobby {
       notOwned: s.isBot ? null : s.notOwned || null,
       // 0.2.0 自选编队: the human's checked DIY picks (bots field no 自选 piece [ASSUMED])
       diy: s.isBot ? null : s.diy || null,
+      // 干员皮肤 (docs/SKINS.md): the human's chosen skins, carried into the match so PlayerState.skins is
+      // populated at construction (battleInput reads it to set each unit's skin); bots have none.
+      skins: s.isBot ? null : s.skins || null,
     }));
     // lastPublic / results: the latest m.public broadcast and the m.result frames (encoded), kept for the replay.
     const ctx = { live: true, ended: false, disposed: false, match: null, lastPublic: null, sharedResult: null,
