@@ -6,8 +6,15 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RESEARCH_PATH = path.join(ROOT, 'docs', 'research', '08-skins.json');
 const TARGET_BASE = path.join(ROOT, 'public', 'assets', 'spine', 'op');
+const AVATAR_DIR = path.join(ROOT, 'public', 'assets', 'char', 'skin_avatar');
 
 const research = JSON.parse(fs.readFileSync(RESEARCH_PATH, 'utf8'));
+
+/** raw.githubusercontent.com/OWNER/REPO/REF/PATH → cdn.jsdelivr.net/gh/OWNER/REPO@REF/PATH（国内可达；raw 常被墙） */
+function jsdelivrify(url) {
+  const m = /^https?:\/\/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/([^/]+)\/(.+)$/.exec(url || '');
+  return m ? `https://cdn.jsdelivr.net/gh/${m[1]}/${m[2]}@${m[3]}/${m[4]}` : null;
+}
 
 // 收集所有需要下载的骨骼文件任务
 const tasks = [];
@@ -15,6 +22,13 @@ const tasks = [];
 for (const [charId, skinList] of Object.entries(research.skins || {})) {
   for (const s of skinList) {
     const stem = s.stem;
+
+    // 皮肤头像（273 套全有）：放在骨骼判断之前，避免无骨骼的皮肤被 continue 跳过
+    if (s.avatar?.url) {
+      tasks.push({ charId, stem, side: 'avatar', file: `${stem}.png`, dir: AVATAR_DIR,
+        url: jsdelivrify(s.avatar.url) || s.avatar.url, fallback: s.avatar.url });
+    }
+
     const bs = s.battleSpine;
     if (!bs) continue;
 
@@ -44,7 +58,7 @@ for (const [charId, skinList] of Object.entries(research.skins || {})) {
   }
 }
 
-console.log(`[skin-spines] 待处理 Spine 文件总数: ${tasks.length}`);
+console.log(`[skin-spines] 待处理文件总数（骨骼+头像）: ${tasks.length}`);
 
 // 支持参数过滤，例如 node tools/fetch-skin-spines.mjs --all 或者指定干员
 const args = process.argv.slice(2);
@@ -66,7 +80,7 @@ async function downloadOne(t) {
   const urls = [t.url, t.fallback].filter(Boolean);
   for (const u of urls) {
     try {
-      const res = await fetch(u, { headers: { 'User-Agent': 'Stronghold-Spine-Sync/1.0' } });
+      const res = await fetch(u, { headers: { 'User-Agent': 'Stronghold-Spine-Sync/1.0' }, signal: AbortSignal.timeout(30000) });
       if (res.ok) {
         const buf = Buffer.from(await res.arrayBuffer());
         if (buf.length > 50) {
@@ -87,14 +101,27 @@ async function main() {
   let downloaded = 0;
   let skipped = 0;
   let failed = 0;
+  let aborted = false;
+
+  // 连通性探测：CDN 不可达时立刻退出，避免 1300+ 个请求逐个超时把启动拖住
+  if (activeTasks.length) {
+    try {
+      const probe = await fetch(activeTasks[0].url, { method: 'HEAD', signal: AbortSignal.timeout(15000) });
+      if (!probe.ok) throw new Error('HTTP ' + probe.status);
+    } catch (e) {
+      console.log(`[skin-spines] CDN 不可达（${e.message}），跳过皮肤下载；游戏仍可运行，稍后重试`);
+      return;
+    }
+  }
 
   async function worker() {
-    while (cursor < activeTasks.length) {
+    while (cursor < activeTasks.length && !aborted) {
       const t = activeTasks[cursor++];
       const res = await downloadOne(t);
       if (res === 'downloaded') downloaded++;
       else if (res === 'skipped') skipped++;
       else failed++;
+      if (failed >= 30 && downloaded === 0 && skipped === 0) aborted = true;
     }
   }
 
