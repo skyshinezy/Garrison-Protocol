@@ -102,6 +102,7 @@ async function main() {
   let skipped = 0;
   let failed = 0;
   let aborted = false;
+  let done = 0;
 
   // 连通性探测：CDN 不可达时立刻退出，避免 1300+ 个请求逐个超时把启动拖住
   if (activeTasks.length) {
@@ -121,6 +122,8 @@ async function main() {
       if (res === 'downloaded') downloaded++;
       else if (res === 'skipped') skipped++;
       else failed++;
+      done++;
+      if (done % 50 === 0) console.log(`[skin-spines] 进度 ${done}/${activeTasks.length}（新下载 ${downloaded}, 已存在 ${skipped}, 失败 ${failed}）`);
       if (failed >= 30 && downloaded === 0 && skipped === 0) aborted = true;
     }
   }
