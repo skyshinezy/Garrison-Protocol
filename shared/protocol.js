@@ -94,6 +94,9 @@ const isLoadoutEntry = (e) => isPlain(e) && Object.keys(e).length > 0 && Object.
 /** Structural check of `room.loadout.entries`. */
 export const isLoadoutEntries = (v) => isMap(v, LOADOUT_LIMITS.entries, isId, isLoadoutEntry);
 
+/** Structural check of `room.skins`: a map of ≤ 256 chessId → skinId (both non-empty strings). */
+export const isSkinsMap = (v) => isMap(v, 256, isStr, isStr);
+
 /** Skill indexes a chess record offers (data `skills[]`, DESIGN §16; the default skill alone while data lacks it). */
 function skillIndexesOf(c) {
   if (!c || typeof c !== 'object') return [];
@@ -427,6 +430,10 @@ export const C2S = {
   // 自选编队 (0.2.0 DIY): the player's DIY slot picks; stored per session / seat like room.ownership (a match takes the
   // picks its seat had when it started; during a match they are stored for the next one: ROOM_STARTED)
   'room.diy': { picks: isDiyPicks },
+  // 干员皮肤 (docs/SKINS.md): a plain { [chessId]: skinId } map mirrored from the client's localStorage; accepted
+  // until the match leaves INFO_CHECK — during a match it is stored for the next one (ROOM_STARTED). The server keeps the
+  // entries whose chess it recognises (freezeSkins) and drops the rest; an unknown skinId is harmless.
+  'room.skins': { skins: isSkinsMap },
   // spectator seats (remake feature, community report #26; MAX_SPECTATORS): take one of a co-op room's spectator seats —
   // in its lobby or while its match runs — never a player seat; the host frees one by playerId (the spectator gets
   // room.closed { reason: 'kicked' }). room.leave / g.leave leave a spectator seat like a player seat.
