@@ -58,7 +58,6 @@ export const WIRE_RECORDS = {
   loadout: ['skill', 'module'],
   ops: ['potential', 'cultivate'],
   diy: ['charId', 'skillIndex', 'uniEquipId'],
-  skins: ['skinId'],
   personalChoice: ['id', 'round', 'sourceItemId', ['cards', list('card')]],
   bossMate: ['playerId', 'side', ['units', list('unit')]],
   stats: ['dmgDealt', 'kills', 'leaks', 'gold', 'refreshes', 'merges', 'itemsEquipped', 'bossDamage', 'activatedLayers', 'lpLost', 'perfectRounds'],
@@ -178,7 +177,7 @@ export const WIRE_MESSAGES = [
   [79, 'b.progress', 'c2s', ['battleId', 'gt', 'killed', 'total', 'resolved', 'leaks', 'bossDmg', 'by', 'done', 'left', 'leaksBy']],
   [80, 'b.result', 'c2s', ['battleId', ['result', 'battleResult']]],
   [81, 'b.yield', 'c2s', ['battleId']],
-  [82, 'room.skins', 'c2s', [['skins', map('skins')]]],
+  [82, 'room.skins', 'c2s', [['skins', map(null)]]],
 ];
 
 // Deep-freeze the registry: mutation of a shared table would silently change the same numeric positions in flight.
