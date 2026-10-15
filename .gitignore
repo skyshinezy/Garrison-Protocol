@@ -1,0 +1,26 @@
+# ---- 依赖与生成物（clone 后由 node tools/setup.mjs 重新生成）----
+node_modules/
+public/vendor/
+.cache/
+.venv-extract/
+.deploy-state/
+.state/
+
+# ---- 下载的美术 / 音频 / 字体（由 tools/fetch-assets.mjs 重新获取，~550MB）----
+# 但 public/assets/local（官方棋盘图 + 战斗场景，~132MB）无法自动下载，必须随仓库一起提交
+public/assets/*
+!/public/assets/local/
+public/fonts/
+
+# ---- 合并 / 备份残留 ----
+_conflicts/
+*.bak
+*.bak-*
+start.sh.bak
+backup_data/
+
+# ---- 运行时状态 ----
+data/*.lock
+data/*.tmp
+*.log
+.env
