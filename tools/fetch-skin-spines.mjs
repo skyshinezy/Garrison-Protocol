@@ -60,9 +60,10 @@ for (const [charId, skinList] of Object.entries(research.skins || {})) {
 
 console.log(`[skin-spines] 待处理文件总数（骨骼+头像）: ${tasks.length}`);
 
-// 支持参数过滤，例如 node tools/fetch-skin-spines.mjs --all 或者指定干员
+// 支持参数过滤，例如 node tools/fetch-skin-spines.mjs char_498_inside；--force 强制重新下载全部
 const args = process.argv.slice(2);
 const limitOp = args.find(a => !a.startsWith('--'));
+const force = args.includes('--force');
 
 let activeTasks = tasks;
 if (limitOp) {
@@ -70,10 +71,37 @@ if (limitOp) {
   console.log(`[skin-spines] 按干员/皮肤过滤: ${limitOp}, 剩余任务: ${activeTasks.length}`);
 }
 
+// 校验本地文件是否为有效下载结果（而非截断/错误页）；损坏则重新下载，
+// 从而让“存在即跳过”可靠、支持断点续传
+function isLikelyValid(dest, file) {
+  try {
+    const st = fs.statSync(dest);
+    if (st.size <= 100) return false;
+    if (file.endsWith('.png')) {
+      const b = fs.readFileSync(dest).slice(0, 8);
+      return b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47; // PNG 签名
+    }
+    return true; // .skel / .atlas 非空即可
+  } catch {
+    return false;
+  }
+}
+
+// 启动前统计本地已就绪数量，明确“续传”状态
+let alreadyValid = 0;
+if (force) {
+  console.log(`[skin-spines] --force: 强制重新下载全部 ${activeTasks.length} 个文件`);
+} else {
+  for (const t of activeTasks) {
+    if (isLikelyValid(path.join(t.dir, t.file), t.file)) alreadyValid++;
+  }
+  console.log(`[skin-spines] 续传检查: 已存在 ${alreadyValid}/${activeTasks.length}, 待下载 ${activeTasks.length - alreadyValid}`);
+}
+
 async function downloadOne(t) {
   fs.mkdirSync(t.dir, { recursive: true });
   const dest = path.join(t.dir, t.file);
-  if (fs.existsSync(dest) && fs.statSync(dest).size > 100) {
+  if (!force && isLikelyValid(dest, t.file)) {
     return 'skipped';
   }
 
@@ -104,6 +132,12 @@ async function main() {
   let aborted = false;
   let done = 0;
 
+  // 已完全同步则跳过（断点续传：重跑只补缺失项）
+  if (!force && alreadyValid === activeTasks.length) {
+    console.log(`[skin-spines] 皮肤已完全同步，跳过下载（用 --force 可强制重新下载全部）`);
+    return;
+  }
+
   // 连通性探测：CDN 不可达时立刻退出，避免 1300+ 个请求逐个超时把启动拖住
   if (activeTasks.length) {
     try {
@@ -132,6 +166,7 @@ async function main() {
   await Promise.all(workers);
 
   console.log(`[skin-spines] 完成: 新下载 ${downloaded}, 已存在 ${skipped}, 失败 ${failed}`);
+  if (failed > 0) console.log(`[skin-spines] 提示: ${failed} 个失败（多为 CDN 个别文件缺失），重新运行即可自动续传剩余项`);
 }
 
 main().catch(e => {
