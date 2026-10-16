@@ -16,7 +16,7 @@ import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } fro
 import htm from '../../vendor/htm.module.js';
 import { DIFFICULTY_NAMES, DIFFICULTY_COLORS } from '../../../shared/constants.js';
 import { t } from '../../../shared/i18n.js';
-import { matchClockNow, emergencyClockAt, useStore } from '../store.js';
+import { serverNow } from '../store.js';
 import { data, useData, localAsset } from '../data.js';
 import { uiUrl } from './assetUrls.js';
 
@@ -48,9 +48,6 @@ export const ICONS = {
   crown: { d: 'M3 7l4.6 4.2L12 4l4.4 7.2L21 7l-1.8 10H4.8zM5 19h14v2H5z' },
   robot: { d: 'M11 2h2v3h4a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V8a3 3 0 0 1 3-3h4zM8.5 9.5a1.75 1.75 0 1 0 0 3.5 1.75 1.75 0 0 0 0-3.5zm7 0a1.75 1.75 0 1 0 0 3.5 1.75 1.75 0 0 0 0-3.5zM9 15v1.6h6V15zM1 10h2v5H1zm20 0h2v5h-2z', eo: true },
   copy: { d: 'M8 3h11v13h-2V5H8zM5 7h10v14H5zm2 2v10h6V9z', eo: true },
-  chat: { d: 'M3 3h18v14H8l-5 4zm2 2v11.8L7.3 15H19V5zm3 3h8v2H8zm0 4h6v2H8z', eo: true },
-  download: { d: 'M11 3h2v9.2l3.6-3.6L18 10l-6 6-6-6 1.4-1.4 3.6 3.6zM4 17h2v3h12v-3h2v5H4z' },
-  folder: { d: 'M2 5h8l2 2h10v14H2zm2 4v10h16V9h-9l-2-2H4z', eo: true },
   link: { d: 'M9 7H6.5a5 5 0 0 0 0 10H9v-2H6.5a3 3 0 0 1 0-6H9zm6 0h2.5a5 5 0 0 1 0 10H15v-2h2.5a3 3 0 0 0 0-6H15zM8 11h8v2H8z' },
   plus: { d: 'M11 4h2v7h7v2h-7v7h-2v-7H4v-2h7z' },
   minus: { d: 'M4 11h16v2H4z' },
@@ -348,7 +345,7 @@ export const hasDeadline = (deadline) => Number.isFinite(deadline) && deadline >
  */
 export function secondsLeft(deadline) {
   if (!hasDeadline(deadline)) return null;
-  return Math.max(0, Math.ceil((deadline - matchClockNow()) / 1000));
+  return Math.max(0, Math.ceil((deadline - serverNow()) / 1000));
 }
 
 /**
@@ -361,9 +358,8 @@ export function secondsLeft(deadline) {
  *   deadline: server epoch ms (live); seconds: static value (overrides deadline); total: seconds for the gauge.
  */
 export function Countdown({ deadline, seconds, total, warnAt = 10, label = 'COUNTDOWN', size = 'md', gauge = true, onExpire, class: cls }) {
-  const emergencyAt = useStore(emergencyClockAt);
   const live = seconds == null && hasDeadline(deadline);
-  useTicker(live && emergencyAt == null ? 200 : 0);
+  useTicker(live ? 200 : 0);
   const remain = seconds != null && Number.isFinite(Number(seconds)) ? Math.max(0, Math.floor(Number(seconds))) : live ? secondsLeft(deadline) : null;
   const warn = remain != null && remain <= warnAt;
   const text = remain == null ? '--' : String(Math.min(999, remain)).padStart(2, '0');
@@ -372,7 +368,7 @@ export function Countdown({ deadline, seconds, total, warnAt = 10, label = 'COUN
 
   const expiredFor = useRef(null);
   useEffect(() => {
-    if (!onExpire || !live || emergencyAt != null) return;
+    if (!onExpire || !live) return;
     if (remain === 0 && expiredFor.current !== deadline) {
       expiredFor.current = deadline;
       onExpire();
@@ -538,24 +534,27 @@ export function DialogHost() {
 
 // ---- Tooltip -----------------------------------------------------------------------------------
 
-let tipState = null; // { id, content, rect, placement }
+let tipState = null; // { id, content, aside, rect, placement }
 let tipSeq = 0;
 const tipListeners = new Set();
 const setTip = (s) => { tipState = s; for (const fn of [...tipListeners]) fn(); };
 
 /**
  * Hover/focus tooltip around its children. Content renders in <TooltipLayer/> (fixed, viewport-clamped).
- * @param {{ text: any, placement?: 'top'|'bottom', delay?: number, block?: boolean, class?: string, children?: any }} props
+ * `aside`: a second section in the same clamped, scrollable box; stacked on narrow screens.
+ * @param {{ text: any, aside?: any, placement?: 'top'|'bottom', delay?: number, block?: boolean, class?: string, children?: any }} props
  */
 const TOUCH_TIP_MS = 450;
 
-export function Tooltip({ text, placement = 'top', delay = 120, block = false, class: cls, children }) {
+export function Tooltip({ text, aside = null, placement = 'top', delay = 120, block = false, class: cls, children }) {
   const ref = useRef(null);
   const idRef = useRef(0);
   const timer = useRef(null);
   const textRef = useRef(text);
+  const asideRef = useRef(aside);
   const pressed = useRef(false); // pointer pressed inside: the focus that follows is not a keyboard focus
   textRef.current = text;
+  asideRef.current = aside;
   if (!idRef.current) idRef.current = ++tipSeq;
   const show = () => {
     clearTimeout(timer.current);
@@ -564,7 +563,8 @@ export function Tooltip({ text, placement = 'top', delay = 120, block = false, c
       const el = ref.current;
       const content = textRef.current; // the text of the render current when the delay ends (a click may change it)
       if (!el || !el.isConnected || content == null || content === '') return;
-      setTip({ id: idRef.current, content, rect: el.getBoundingClientRect(), placement });
+      setTip({ id: idRef.current, content, aside: asideRef.current, rect: el.getBoundingClientRect(), placement,
+        hold: () => clearTimeout(timer.current), hide });
     }, delay);
   };
   const hide = () => {
@@ -574,7 +574,7 @@ export function Tooltip({ text, placement = 'top', delay = 120, block = false, c
   // A click hides the tooltip until the pointer leaves: the focus it gives the button must not bring it back
   // (with the text of the click's closure) over whatever the click opened. Keyboard focus still shows it.
   // Touch: a tap never shows it (the compatibility mouseenter that follows a tap is ignored); a long press
-  // (≥ 450 ms) does, and it goes away shortly after the finger lifts.
+  // (≥ 450 ms) does. Ordinary tips expire after release; compound lists stay open for scrolling until dismissed.
   const touchAt = useRef(0);
   const longTimer = useRef(null);
   const onPointerDown = (e) => {
@@ -590,18 +590,24 @@ export function Tooltip({ text, placement = 'top', delay = 120, block = false, c
     if (!e || e.pointerType === 'mouse') return;
     touchAt.current = Date.now();
     clearTimeout(longTimer.current);
-    if (tipState?.id === idRef.current) { clearTimeout(timer.current); timer.current = setTimeout(hide, 1600); }
+    if (tipState?.id === idRef.current && !asideRef.current) { clearTimeout(timer.current); timer.current = setTimeout(hide, 1600); }
   };
   const onMouseEnter = () => { if (Date.now() - touchAt.current > 900) show(); };
   const onFocusIn = () => { if (!pressed.current && Date.now() - touchAt.current > 900) show(); };
-  const onLeave = () => { pressed.current = false; if (Date.now() - touchAt.current > 900) hide(); };
+  const onLeave = () => {
+    pressed.current = false;
+    if (Date.now() - touchAt.current > 900) {
+      if (asideRef.current) { clearTimeout(timer.current); timer.current = setTimeout(hide, 250); }
+      else hide();
+    }
+  };
   useEffect(() => () => { clearTimeout(longTimer.current); hide(); }, []);
   // Keep the visible tooltip's content fresh when `text` changes (and hide it when text goes away).
   useEffect(() => {
     if (tipState?.id !== idRef.current) return;
     if (text == null || text === '') setTip(null);
-    else setTip({ ...tipState, content: text });
-  }, [text]);
+    else setTip({ ...tipState, content: text, aside: asideRef.current });
+  }, [text, aside]);
   return html`<span ref=${ref} class=${cx('tt-anchor', block && 'tt-anchor--block', cls)}
       onMouseEnter=${onMouseEnter} onMouseLeave=${onLeave} onFocusIn=${onFocusIn} onFocusOut=${onLeave} onPointerDown=${onPointerDown}
       onPointerUp=${onPointerEnd} onPointerCancel=${onPointerEnd} onContextMenu=${(e) => { if (Date.now() - touchAt.current < 900) e.preventDefault(); }}>
@@ -616,7 +622,12 @@ export function TooltipLayer() {
   const [pos, setPos] = useState(null);
   useEffect(() => {
     tipListeners.add(force);
-    return () => tipListeners.delete(force);
+    const outside = (e) => { if (tipState?.aside && !e.target?.closest?.('.tooltip')) tipState.hide?.(); };
+    const escape = (e) => { if (e.key === 'Escape') tipState?.hide?.(); };
+    document.addEventListener('pointerdown', outside);
+    document.addEventListener('keydown', escape);
+    window.addEventListener('resize', force);
+    return () => { tipListeners.delete(force); document.removeEventListener('pointerdown', outside); document.removeEventListener('keydown', escape); window.removeEventListener('resize', force); };
   }, []);
   useLayoutEffect(() => {
     const el = boxRef.current;
@@ -632,13 +643,21 @@ export function TooltipLayer() {
     if (place === 'bottom' && top + b.height > vh - m) { place = 'top'; top = Math.max(m, r.top - b.height - m); }
     let left = r.left + r.width / 2 - b.width / 2;
     left = Math.max(m, Math.min(vw - b.width - m, left));
+    top = Math.max(m, Math.min(vh - b.height - m, top));
     const next = { top: Math.round(top), left: Math.round(left), place, id: tipState.id };
     if (!pos || pos.top !== next.top || pos.left !== next.left || pos.id !== next.id || pos.place !== next.place) setPos(next);
   });
   if (!tipState) return null;
   const ready = pos && pos.id === tipState.id;
-  return html`<div ref=${boxRef} class=${cx('tooltip', ready && 'is-shown', ready && `tooltip--${pos.place}`)} role="tooltip"
-    style=${ready ? `top:${pos.top}px;left:${pos.left}px` : 'top:-9999px;left:-9999px'}>${tipState.content}</div>`;
+  const hasAside = tipState.aside != null && tipState.aside !== '';
+  const off = 'top:-9999px;left:-9999px';
+  return html`<div ref=${boxRef} class=${cx('tooltip', hasAside && 'tooltip--compound', ready && 'is-shown', ready && `tooltip--${pos.place}`)} role="tooltip"
+    tabIndex=${hasAside ? 0 : undefined} onMouseEnter=${() => tipState?.hold?.()} onMouseLeave=${() => tipState?.hide?.()}
+    onFocusIn=${() => tipState?.hold?.()} onPointerDown=${() => tipState?.hold?.()}
+    onFocusOut=${(e) => { if (!e.currentTarget.contains(e.relatedTarget)) tipState?.hide?.(); }}
+    style=${ready ? `top:${pos.top}px;left:${pos.left}px` : off}>
+    ${hasAside ? html`<div class="tooltip__main">${tipState.content}</div><div class="tooltip--aside">${tipState.aside}</div>` : tipState.content}
+  </div>`;
 }
 
 // ---- ProgressBar, Tabs, Spinner ----------------------------------------------------------------

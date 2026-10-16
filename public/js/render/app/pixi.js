@@ -1,5 +1,4 @@
 // public/js/render/app/pixi.js — load PIXI and pixi-spine once (one module-level promise).
-import { runtimeURL } from '../../runtime.js';
 
 import { installPixiNoEval } from './pixiNoEval.js';
 
@@ -10,7 +9,7 @@ let pixiPromise = null;
 function loadScript(src) {
   return new Promise((resolve, reject) => {
     const s = document.createElement('script');
-    s.src = runtimeURL(src);
+    s.src = src;
     s.async = false;
     s.onload = () => resolve();
     s.onerror = () => reject(new Error(`failed to load ${src}`));

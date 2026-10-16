@@ -26,11 +26,22 @@
 // each text from the first overlay of the chain that has it, else the Chinese one. `setLocale('zh')` goes back. Each
 // switch notifies the subscribers of every loaded file, so `useData` components re-render. `localeName(zh)` maps a
 // Chinese game-data name to the current language (server messages name operators / items in Chinese).
+//
+// Views (DESIGN §32 P1a): `setView(name, fn)` shows a file through `fn` from then on — `get(name)` returns fn(the file);
+// `getRaw`, `lookup` and `list` do not — and tells the file's subscribers. public/js/content.js shows the art manifest
+// (`assets`) this way: with the room's cosmetic plugins and the player's own laid over it (public/js/assets.js
+// cosmetics.apply), so every `data.get('assets')` of the interface draws what the room draws.
+//
+// Content sets (DESIGN §32.6 P1c): `setContent({ id, values, overlay })` makes the files of `values` (name → the JSON a
+// page checked: public/js/content.js, every byte against the set's /cs/<cs16>/index.json) the store's files — `get`,
+// `lookup`, `list` and every getter read the room's content set — and `overlay(lang)` the source of a language's game
+// texts (the set's own i18n/<lang>.json: a plugin's operators named in that language); `setContent(null)` gives the
+// server's files back (the entries the set replaced, kept meanwhile — nothing is downloaded again) and its overlays. The
+// subscribers of every file that changed hands are told. One content set at a time: the next one replaces it.
 
 import { useEffect, useReducer } from '../vendor/hooks.module.js';
 import { applyFileOverlay } from '../../shared/i18nData.js';
 import { canonicalLang } from '../../shared/i18nPacks.js';
-import { runtimeURL, runtimeCacheMode } from './runtime.js';
 
 /** Known data files (name → URL basename). Unknown names are allowed too (`/data/<name>.json`). */
 export const DATA_FILES = Object.freeze({
@@ -177,8 +188,7 @@ export function createDataStore(opts = {}) {
    */
   function readJson(name) {
     const run = async () => {
-      const url = runtimeURL(urlFor(name));
-      const res = await doFetch(url, { cache: runtimeCacheMode(url) });
+      const res = await doFetch(urlFor(name), { cache: 'no-cache' });
       if (!res || !res.ok) throw Object.assign(new Error(`HTTP ${res ? res.status : '???'}`), { status: res ? res.status : null });
       try {
         return await res.json();
@@ -295,16 +305,25 @@ export function createDataStore(opts = {}) {
   }
 
   /**
-   * Download (once per language) a game-text overlay — `url` (a pack folder's file, from the pack index) or the language
-   * folder's data/i18n/<lang>.json; resolves to it, or null when unavailable.
+   * Download (once per language and source) a game-text overlay — `url` (a pack folder's file, from the pack index) or
+   * the language folder's data/i18n/<lang>.json, or — a content set with texts of its own for the language (setContent) —
+   * the set's i18n/<lang>.json through its `overlay` loader; resolves to it, or null when unavailable.
    */
   function loadOverlay(lang, url = `${base}i18n/${lang}.json`) {
-    if (overlayLoads.has(lang)) return overlayLoads.get(lang);
+    const own = content && content.overlay && content.langs.has(lang) ? content : null;
+    const key = own ? `${own.id}|${lang}` : lang;
+    if (overlayLoads.has(key)) return overlayLoads.get(key);
     const p = (async () => {
+      if (own) {
+        let json = null;
+        try { json = await own.overlay(lang); } catch (err) { console.warn(`[data] the content set's ${lang} texts are not applied`, err); }
+        if (json && typeof json === 'object' && json.files) { overlays.set(lang, json); return json; }
+        overlayLoads.delete(key);
+        return null;
+      }
       for (let attempt = 0; ; attempt++) {
         try {
-          const versioned = runtimeURL(url);
-          const res = await doFetch(versioned, { cache: runtimeCacheMode(versioned) });
+          const res = await doFetch(url, { cache: 'no-cache' });
           if (!res || !res.ok) throw Object.assign(new Error(`HTTP ${res ? res.status : '???'}`), { status: res ? res.status : null });
           const json = await res.json();
           if (!json || typeof json !== 'object' || !json.files) throw Object.assign(new Error('not an overlay'), { badJson: true });
@@ -313,15 +332,21 @@ export function createDataStore(opts = {}) {
         } catch (err) {
           if (transientFailure(err) && attempt < retryDelays.length) { await wait(retryDelays[attempt]); continue; }
           console.warn(`[data] ${url} unavailable (${err?.message || err}); its game texts are not applied`);
-          overlayLoads.delete(lang); // a later switch may try again
+          overlayLoads.delete(key); // a later switch may try again
           return null;
         }
       }
     })();
-    overlayLoads.set(lang, p);
+    overlayLoads.set(key, p);
     return p;
   }
 
+  /**
+   * The content set's files become the store's (see the header), or the server's again (null). Every file that changes
+   * hands is told to its subscribers; the current language's game texts are taken from the new source.
+   * @param {{ id: string, values: Map<string, any> | Record<string, any>, overlay?: ((lang: string) => Promise<any>) | null,
+   *   langs?: Iterable<string> } | null} next
+   */
   function setContent(next) {
     const prev = content;
     const values = next ? (next.values instanceof Map ? next.values : new Map(Object.entries(next.values || {}))) : null;
@@ -352,6 +377,10 @@ export function createDataStore(opts = {}) {
   const api = {
     /** Fetch (once) and return a file's JSON, or null when missing. */
     load,
+    /** A content set's files instead of the server's, or the server's again (null) — see the header. */
+    setContent,
+    /** The id of the content set the files come from (its cs), or null. */
+    contentId: () => content?.id ?? null,
     /** Load several files; resolves when all settled. */
     loadAll: (...names) => Promise.all(names.flat().map(load)),
     /** JSON of a loaded file in the current locale, through its view (setView); null when missing / not loaded yet. */
@@ -359,22 +388,6 @@ export function createDataStore(opts = {}) {
       const v = localizedEntry(name)?.value ?? entries.get(name)?.value ?? null;
       const view = views.get(name);
       return view && v != null ? view(v) : v;
-    },
-    /** A content set's files instead of the server's, or the server's again (null) — see the header. */
-    setContent,
-    /** The id of the content set the files come from (its cs), or null. */
-    contentId: () => content?.id ?? null,
-    /**
-     * Show a file through `fn` from now on (`get` returns fn(file); `fn` should return the same object while its inputs
-     * stay — content.js's does), or as downloaded again (null). The file's subscribers are notified: call it again after
-     * the view's own inputs changed (see the header).
-     * @param {string} name
-     * @param {((value: any) => any) | null} fn
-     */
-    setView(name, fn) {
-      if (typeof fn === 'function') views.set(name, fn);
-      else views.delete(name);
-      notify(name);
     },
     /** The file exactly as downloaded (Chinese texts), whatever the locale. */
     getRaw: (name) => entries.get(name)?.value ?? null,
@@ -409,6 +422,18 @@ export function createDataStore(opts = {}) {
       const p = load(name);
       notify(name); // status is 'loading' again, never a stuck 'idle'
       return p;
+    },
+    /**
+     * Show a file through `fn` from now on (`get` returns fn(file); `fn` should return the same object while its inputs
+     * stay — content.js's does), or as downloaded again (null). The file's subscribers are notified: call it again after
+     * the view's own inputs changed (see the header).
+     * @param {string} name
+     * @param {((value: any) => any) | null} fn
+     */
+    setView(name, fn) {
+      if (typeof fn === 'function') views.set(name, fn);
+      else views.delete(name);
+      notify(name);
     },
     /** Called with the file name whenever a file finishes loading (or is invalidated, or the locale changes). */
     subscribe(fn) {
