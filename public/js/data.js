@@ -470,6 +470,7 @@ export function createDataStore(opts = {}) {
       return zh;
     },
   };
+  return api;
 }
 
 /** Browser data store singleton. */
