@@ -202,6 +202,8 @@ export class Room {
     this.seats = new Array(this.capacity).fill(null);
     /** @type {{ playerId: string, name: string, connected: boolean }[]} spectator seats, ≤ MAX_SPECTATORS (header) */
     this.spectators = [];
+    /** @type {Array<{ id: string, settings?: Record<string, unknown> }>} host-chosen cosmetic plugins (DESIGN §32); visual set resolved later */
+    this.plugins = [];
     /** @type {any} running Match instance */
     this.match = null;
     /** @type {{ live: boolean, ended: boolean, disposed: boolean, match: any, chat: MatchChat } | null} */
@@ -257,6 +259,7 @@ export class Room {
         ? { seat: s.seat, playerId: s.playerId, name: s.name, isBot: s.isBot, ready: s.ready, connected: s.connected && !s.left }
         : null)),
       spectators: this.spectators.map((s) => ({ playerId: s.playerId, name: s.name, connected: s.connected })),
+      plugins: this.plugins || [],
     };
   }
 }
@@ -442,6 +445,7 @@ export class Lobby {
       case 'room.ownership': return this.ownership(session, msg);
       case 'room.diy': return this.diy(session, msg);
       case 'room.skins': return this.skins(session, msg);
+      case 'room.setPlugins': return this.setPlugins(session, msg);
       case 'room.spectate': return this.spectate(session, msg);
       case 'room.removeSpectator': return this.removeSpectator(session, msg);
       case 'room.chat': return this.chat(session, msg);
@@ -861,6 +865,35 @@ export class Lobby {
     if (r && typeof r === 'object' && r.error) {
       return fail(isErrCode(r.error) ? r.error : ERR.INTERNAL, typeof r.detail === 'string' ? r.detail : undefined);
     }
+    return OK;
+  }
+
+  /**
+   * room.setPlugins (DESIGN §32 P1a, cosmetic plugins only): the host switches on a subset of this server's
+   * cosmetic plugins before the match. Stores the raw list on the room and broadcasts room.state. Visual-set
+   * resolution (server/plugins/visualSet.js → room.state.content.vs) is wired in a later phase; for now the
+   * room keeps the list verbatim so the client's plugin picker has something to read.
+   */
+  setPlugins(session, { plugins }) {
+    const room = this.roomOf(session);
+    if (!room) return fail(ERR.NOT_IN_ROOM);
+    if (room.hostId !== session.playerId) return fail(ERR.NOT_HOST);
+    if (room.match) return fail(ERR.ROOM_STARTED);
+    if (!Array.isArray(plugins)) return fail(ERR.BAD_MSG, 'plugins must be a list');
+    for (const p of plugins) {
+      if (!p || typeof p.id !== 'string' || !/^[a-z0-9][a-z0-9-]{1,31}$/.test(p.id)) {
+        return fail(ERR.BAD_MSG, 'invalid plugin id');
+      }
+    }
+    this.dropReplay(room, session.playerId);
+    const prev = room.plugins.map((p) => p.id).join(',');
+    const next = plugins.map((p) => p.id).join(',');
+    room.plugins = plugins;
+    if (prev !== next) {
+      // like a difficulty change: a different set un-readies the other humans
+      for (const s of room.seats) if (s && !s.isBot && s.playerId !== room.hostId) s.ready = false;
+    }
+    this.broadcastState(room);
     return OK;
   }
 
