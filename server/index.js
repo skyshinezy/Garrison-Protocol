@@ -27,7 +27,14 @@ import { getData, loadData } from './data.js';
 import { ROOT, listenAddress, bindCandidates, serveDirs, makeLogger, parseTrustProxy } from './http/config.js';
 import { WS_MAX_PAYLOAD, createSessionStack, attachWebSocket } from './http/websocket.js';
 import { DATA_SHIM_JS, createStaticHandler } from './http/static.js';
+import path from 'node:path';
 import { createPackRegistry } from './packs.js';
+import { createPluginRegistry } from './plugins/registry.js';
+import { computeVanillaContent } from './plugins/identity.js';
+import { createVisualSets } from './plugins/visualSet.js';
+import { createPluginPolicy } from './plugins/policy.js';
+
+import { createRoomSets } from './plugins/roomSets.js';
 import { createAnnouncementStore } from './announcements.js';
 import { createAnnouncementNoticeMonitor } from './announcementNotices.js';
 import { createServerSettings } from './serverSettings.js';
@@ -72,13 +79,24 @@ export async function startServer(opts = {}) {
   const emergencyOptions = bandwidthEmergencyOptions(opts.bandwidthEmergency === false ? { enabled: false } : opts.bandwidthEmergency || {});
   const { port, host } = listenAddress(opts);
   const log = opts.log || makeLogger(!!opts.quiet);
-  const { publicDir, dataDir, sharedDir, packsDir } = serveDirs(opts);
+  const { publicDir, dataDir, sharedDir, packsDir, pluginsDir } = serveDirs(opts);
 
   // The process-wide singleton serves the default data dir; a custom dir (tests) gets its own copy.
   const data = opts.dataDir ? loadData(dataDir, { log }) : getData({ dir: dataDir, log });
   const serverSettings = createServerSettings({ dir: opts.serverSettingsDir, root: ROOT, log,
     onChange: (next) => applySettings(next) });
-  const { registry, lobby, network } = createSessionStack(opts, { data, log });
+  // The plugin / cosmetic-visual-set engine (DESIGN §32): scan the plugins/ dir, compute the vanilla content hash, and
+  // build the room-set resolver the lobby uses for room.setPlugins. An empty plugins/ dir → a vanilla-only server.
+  const simDir = path.join(ROOT, 'server', 'sim');
+  const content = computeVanillaContent({ simDir, sharedDir, dataDir, shim: DATA_SHIM_JS, log });
+  const plugins = createPluginRegistry({ publicDir, dataDir, packsDir, pluginsDir }, { log, scriptHost: host, scriptMode: process.env.SP_PLUGIN_SCRIPTS });
+  plugins.refresh(true);
+  const visual = createVisualSets({ registry: plugins, log });
+  const policy = createPluginPolicy({ pluginsDir, log });
+  // content sets (gameplay plugins) are out of scope for this cosmetic-only build (DESIGN §32 P1a); pass null so
+  // createRoomSets only resolves cosmetic / visual-set plugins.
+  const roomSets = createRoomSets({ registry: plugins, visual, contents: null, policy });
+  const { registry, lobby, network } = createSessionStack(opts, { data, log, content, plugins: roomSets });
   const announcements = createAnnouncementStore({ dir: opts.announcementsDir, root: ROOT, log });
   const announcementNotices = createAnnouncementNoticeMonitor({ store: announcements, network, log });
   // content packs (docs/PACKS.md): scanned now — the start log names them — and again whenever their folders change

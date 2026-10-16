@@ -61,6 +61,7 @@ export function serveDirs(opts) {
     dataDir: opts.dataDir || path.join(ROOT, 'data'),
     sharedDir: opts.sharedDir || path.join(ROOT, 'shared'),
     packsDir: opts.packsDir || path.join(ROOT, 'packs'),
+    pluginsDir: opts.pluginsDir || path.join(ROOT, 'plugins'),
   };
 }
 

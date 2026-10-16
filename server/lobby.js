@@ -204,6 +204,10 @@ export class Room {
     this.spectators = [];
     /** @type {Array<{ id: string, settings?: Record<string, unknown> }>} host-chosen cosmetic plugins (DESIGN §32); visual set resolved later */
     this.plugins = [];
+    /** @type {any} resolved content set (DESIGN §32): room.state.content — vanilla until room.setPlugins resolves */
+    this.content = null;
+    /** @type {string[]} shared content-set ids (DESIGN §32 P3); empty for cosmetic-only sets */
+    this.shareHistory = [];
     /** @type {any} running Match instance */
     this.match = null;
     /** @type {{ live: boolean, ended: boolean, disposed: boolean, match: any, chat: MatchChat } | null} */
@@ -223,6 +227,9 @@ export class Room {
     this.createdAt = now;
     this.disposed = false;
   }
+
+  /** A room is modded when its content set isn't the vanilla one (DESIGN §32) — cosmetic plugins keep it vanilla. */
+  get modded() { return !!this.content && this.content.vanilla === false; }
 
   /** @param {string} playerId @returns {Seat | null} */
   seatOf(playerId) {
@@ -260,6 +267,7 @@ export class Room {
         : null)),
       spectators: this.spectators.map((s) => ({ playerId: s.playerId, name: s.name, connected: s.connected })),
       plugins: this.plugins || [],
+      ...(this.content ? { content: this.content } : {}),
     };
   }
 }
@@ -277,7 +285,7 @@ export class Lobby {
    *   options?: Partial<typeof LOBBY_DEFAULTS>,
    * }} opts
    */
-  constructor({ registry, log = noopLog, MatchClass = DefaultMatch, getData = defaultGetData, now = Date.now, seedFn, options = {} }) {
+  constructor({ registry, log = noopLog, MatchClass = DefaultMatch, getData = defaultGetData, now = Date.now, seedFn, options = {}, content = null, plugins = null }) {
     this.registry = registry;
     this.log = log;
     this.MatchClass = MatchClass;
@@ -299,6 +307,10 @@ export class Lobby {
     this.resyncTimers = new Map();
     /** per-network limit warnings: at most one log line per 10 s (the rest are counted) */
     this.limitLog = { at: -Infinity, suppressed: 0 };
+    // The plugin / cosmetic-visual-set engine (DESIGN §32). `vanilla` is the frozen vanilla content identity;
+    // `plugins` resolves a room's chosen plugins into a visual set (room.state.content).
+    this.vanilla = content ? Object.freeze({ ...content, vanilla: true, plugins: [] }) : { cs: null, vanilla: true, plugins: [] };
+    this.plugins = plugins;
   }
 
   /** @param {string} code @returns {Room | null} */
@@ -522,6 +534,17 @@ export class Lobby {
     if (!code) return fail(ERR.INTERNAL, 'no room code available');
     if (cur) this.removeMember(cur, session.playerId);
     const room = new Room(code, mode, difficulty, this.now(), capacity);
+    room.content = this.vanilla;
+    if (this.plugins) {
+      // Server-owner default / fixed plugins (DESIGN §32 P4): apply them so a fresh room already carries the set.
+      const defaults = this.plugins.defaults(this.hosts);
+      const fixed = this.plugins.fixed();
+      if ((defaults && defaults.length) || (fixed && fixed.length)) {
+        const ids = [...(defaults || []), ...(fixed || [])].map((p) => p.id);
+        const r = this.resolveContent(room, ids, {});
+        if (r.content) room.content = r.content;
+      }
+    }
     room.maxAiPerRoom = this.maxAiPerRoom;
     room.ownerKey = key;
     room.seats[0] = this.humanSeat(0, session);
@@ -868,34 +891,45 @@ export class Lobby {
     return OK;
   }
 
-  /**
-   * room.setPlugins (DESIGN §32 P1a, cosmetic plugins only): the host switches on a subset of this server's
-   * cosmetic plugins before the match. Stores the raw list on the room and broadcasts room.state. Visual-set
-   * resolution (server/plugins/visualSet.js → room.state.content.vs) is wired in a later phase; for now the
-   * room keeps the list verbatim so the client's plugin picker has something to read.
-   */
+  // ---------------------------------------------------------------------------------------------------
+  // Plugins (DESIGN §32, P1a cosmetic only): the host switches on a subset of this server's cosmetic plugins
+  // before the match. room.setPlugins resolves them into room.state.content (the visual set, vs).
+
   setPlugins(session, { plugins }) {
+    if (!Array.isArray(plugins)) return fail(ERR.BAD_MSG, 'plugins must be a list');
+    for (const p of plugins) {
+      if (!p || typeof p.id !== 'string' || !/^[a-z0-9][a-z0-9-]{1,31}$/.test(p.id)) return fail(ERR.BAD_MSG, 'invalid plugin id');
+    }
     const room = this.roomOf(session);
     if (!room) return fail(ERR.NOT_IN_ROOM);
     if (room.hostId !== session.playerId) return fail(ERR.NOT_HOST);
-    if (room.match) return fail(ERR.ROOM_STARTED);
-    if (!Array.isArray(plugins)) return fail(ERR.BAD_MSG, 'plugins must be a list');
-    for (const p of plugins) {
-      if (!p || typeof p.id !== 'string' || !/^[a-z0-9][a-z0-9-]{1,31}$/.test(p.id)) {
-        return fail(ERR.BAD_MSG, 'invalid plugin id');
-      }
-    }
+    if (room.match) return fail(ERR.ROOM_STARTED, 'leave your running match first');
     this.dropReplay(room, session.playerId);
-    const prev = room.plugins.map((p) => p.id).join(',');
-    const next = plugins.map((p) => p.id).join(',');
-    room.plugins = plugins;
+    const ids = plugins.map((p) => p.id);
+    const r = this.resolveContent(room, ids, {});
+    if (r.error) return fail(isErrCode(r.error) ? r.error : ERR.INTERNAL, typeof r.detail === 'string' ? r.detail : undefined);
+    const prev = room.content?.plugins.map((p) => p.id).join(',') ?? '';
+    const next = r.content.plugins.map((p) => p.id).join(',');
+    room.content = r.content;
+    room.shareHistory = [];
     if (prev !== next) {
-      // like a difficulty change: a different set un-readies the other humans
-      for (const s of room.seats) if (s && !s.isBot && s.playerId !== room.hostId) s.ready = false;
+      // a different set un-readies the other humans (like a difficulty change)
+      const nextPlugins = new Set(next.split(',').filter(Boolean));
+      for (const s of room.seats) {
+        if (s && !s.isBot && s.playerId !== room.hostId && !nextPlugins.has(s.pluginId)) s.ready = false;
+      }
     }
     this.broadcastState(room);
     return OK;
   }
+
+  resolveContent(room, ids, settings) {
+    if (!this.plugins) return { content: this.vanilla };
+    return this.plugins.resolve(ids, { scope: 'room', settings, replacing: room.content });
+  }
+
+  holdContent(cs) { this.plugins?.holdContent(cs); }
+  releaseContent(cs) { this.plugins?.releaseContent(cs); }
 
   /**
    * room.ownership (0.2.0 补位): keep the droppable chess of the not-owned list, store it on the session and the seat
@@ -935,7 +969,9 @@ export class Lobby {
 
   /** Extra welcome fields: supported 自选 operators and the current owner-controlled precache policy. */
   welcomeInfo() {
-    return { diyKitted: KITTED_CHARS, requireAssetCache: this.requireAssetCache, emergency: this.emergency };
+    const n = this.plugins ? this.plugins.unofficial() : 0;
+    return { diyKitted: KITTED_CHARS, requireAssetCache: this.requireAssetCache, emergency: this.emergency,
+      content: { vanilla: this.vanilla.cs, plugins: n }, plugins: n };
   }
 
   // ---------------------------------------------------------------------------------------------------

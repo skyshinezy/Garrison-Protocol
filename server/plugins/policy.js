@@ -26,7 +26,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { isPluginId } from '../../shared/plugins/manifest.js';
-import { DEFAULT_MAX_SETS } from './contentSets.js';
+// Cosmetic-only build (DESIGN §32 P1a): content sets (gameplay plugins) are out of scope for this merge, so the
+// max-sets default is inlined here rather than imported from contentSets.js (which depends on v0.3.0's sim/content).
+const DEFAULT_MAX_SETS = 4;
 
 /** The policy file's name, at the top of plugins/. */
 export const POLICY_FILE = 'config.json';
