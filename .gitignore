@@ -24,3 +24,8 @@ data/*.lock
 data/*.tmp
 *.log
 .env
+
+# ---- 官方战斗特效素材（Hypergryph 版权素材，不进仓库；手动上传 local-fx-bundle.zip 后由启动脚本解压）----
+public/assets/local/fx/
+data/local-fx.json
+local-fx-bundle.zip
