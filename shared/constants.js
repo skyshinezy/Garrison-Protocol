@@ -6,6 +6,9 @@ export const PROTOCOL_VERSION = 1;
 /** Release version shown to players (title screen, server banner, /healthz). Kept equal to package.json "version"
  * (test/version.test.js); PROTOCOL_VERSION above is the separate wire-format number. */
 export const APP_VERSION = '0.2.5';
+/** Plugin API levels this build supports (DESIGN §32, shared/plugins/manifest.js isApiCompatible): a manifest states
+ * the level it is written for; a level outside min…current keeps the plugin out. [ASSUMED] */
+export const PLUGIN_API = Object.freeze({ current: 1, min: 1 });
 /** A development build (the public `dev` branch): the title screen, the boot banner and the README say so, and
  * tools/package.mjs refuses to build a release zip from it without --allow-dev. */
 export const DEV_BUILD = /-dev$/.test(APP_VERSION);
