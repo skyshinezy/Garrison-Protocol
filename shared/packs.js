@@ -175,6 +175,21 @@ export function normalizeManifest(raw, ctx) {
     // requires: a plugin's dependencies (id → version range); absent for language packs and cosmetic-only plugins (v0.3.0
     // registry.js iterates it at scan time, so it must always be an object — DESIGN §32 P1c).
     requires: isObj(m.requires) ? m.requires : {},
+    // the remaining fields mirror v0.3.0's manifest contract (shared/plugins/manifest.js: pluginIndexEntry reads them,
+    // and registry.js's readLangFile / readPackFolder also expect them). Plugin packs leave them empty; cosmetic and
+    // interface plugins fill them from _meta. The defaults keep the catalogue builder from choking on absent fields.
+    names: isObj(m.names) ? m.names : {},
+    description: isObj(m.description) ? m.description : {},
+    scope: Array.isArray(m.scope) ? m.scope : [],
+    api: m.api ?? null,
+    optional: isObj(m.optional) ? m.optional : {},
+    conflicts: isObj(m.conflicts) ? m.conflicts : {},
+    loadAfter: Array.isArray(m.loadAfter) ? m.loadAfter : [],
+    loadBefore: Array.isArray(m.loadBefore) ? m.loadBefore : [],
+    settings: isObj(m.settings) ? m.settings : {},
+    permissions: Array.isArray(m.permissions) ? m.permissions : [],
+    homepage: typeof m.homepage === 'string' ? m.homepage : null,
+    priority: Number.isFinite(m.priority) ? m.priority : 0,
   };
   if (type === 'lang') {
     const code = ctx.lang || canonicalLang(m.lang);

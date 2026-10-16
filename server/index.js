@@ -102,7 +102,7 @@ export async function startServer(opts = {}) {
   // content packs (docs/PACKS.md): scanned now — the start log names them — and again whenever their folders change
   const packs = createPackRegistry({ publicDir, dataDir, packsDir }, { log });
   packs.refresh(true);
-  const serveStatic = createStaticHandler({ publicDir, dataDir, sharedDir, packsDir, packs, runtimeCache: opts.runtimeCache, log });
+  const serveStatic = createStaticHandler({ publicDir, dataDir, sharedDir, packsDir, packs, plugins, runtimeCache: opts.runtimeCache, log });
   // A persisted owner limit overrides the programmatic/env fallback. A null setting means the
   // default unlimited limiter, while keeping tests and embedders' explicit opts usable.
   const fallbackAssetCacheLimits = opts.assetCacheLimits;
