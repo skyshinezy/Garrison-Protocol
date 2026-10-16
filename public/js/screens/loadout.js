@@ -28,7 +28,7 @@ import { Img, RichText, UnitThumb } from '../ui/gameComponents.js';
 import { chessAvatarUrl, chessPortraitUrl, subProfIconUrl, bondIconUrl, moduleTypeIconUrl } from '../ui/assetUrls.js';
 import { GarrisonBlock } from '../ui/detailPanel.js';
 import { data, useData, localAsset, DATA_FILES } from '../data.js';
-import { useStore } from '../store.js';
+import { useStore, shallowEqual } from '../store.js';
 import { PHASE } from '../../../shared/constants.js';
 import {
   MODULE_NONE, PROF_ORDER, PROF_NAME, rosterOf, filterRoster, recordsOf, chessOptions, effectiveChoice, setChoice, resetChoice,
@@ -49,6 +49,8 @@ import { diyCount, sanitizeDiyPicks, setPick, serializeDiy, parseDiyImport, DIY_
 import { t, tParts, N_ } from '../../../shared/i18n.js';
 import { copyText } from '../ui/clipboard.js';
 import { toast } from '../ui/toasts.js';
+import { skinsStore, applyAllSkins, clearAllSkins, availableSkins, loadSkinData } from '../ui/skins.js';
+import { SkinSection } from '../ui/skinPicker.js';
 
 export { openLoadout, closeLoadout };
 
@@ -355,6 +357,7 @@ function Detail({ m, chess, golden, entries, ops = {}, onChange, onOps, onReset,
         </div>
       </section>
       <${LoadoutStats} base=${chess} golden=${golden} entries=${entries} ops=${ops} level=${statLevel} onLevel=${setStatLevel} />
+      <${SkinSection} chess=${chess} />
       ${golden ? html`<section class="lo-sec lo-sec--mod">
         <header class="lo-sec__head">
           <h3>${t('模组')}<${MicroLabel}>MODULE<//></h3>
@@ -505,6 +508,13 @@ function LoadoutScreen({ st }) {
   const [previewLevel, setPreviewLevel] = useState('normal');
   const [io, setIo] = useState(null);                      // 导出 / 导入 dialog: { mode, text } | null
 
+  // 皮肤：随调配界面一并载入目录（与详情面板的 SkinSection 共用同一份数据），并统计有皮肤的干员数 / 已选数
+  useEffect(() => { loadSkinData(); }, []);
+  const skinReady = data.status('skins') === 'ready';
+  const nSkin = skinReady ? roster.filter((c) => { const l = availableSkins(c.charId); return l && l.length; }).length : 0;
+  const skinEntries = useStore((s) => s.entries, shallowEqual, skinsStore);
+  const skinCount = Object.keys(skinEntries).length;
+
   const tab = st.tab === 'ownership' || st.tab === 'diy' ? st.tab : 'loadout';
   const lost = ready ? missingGameData(tab) : [];
   const ownRoster = useOwnershipRoster(ready);
@@ -550,6 +560,19 @@ function LoadoutScreen({ st }) {
     for (const [id, e] of Object.entries(loadoutStore.get().ops || {})) if (!rosterChars.has(id)) keep[id] = e;
     setOpsMap(keep);
     setEntries({});
+  };
+
+  // 一键换装：给每名有皮肤的干员套上第一款皮肤（覆盖其现有选择）
+  const oneClickSkins = () => {
+    if (!nSkin) return;
+    const n = applyAllSkins(roster);
+    if (n) toast(t('已为 {n} 名干员换上皮肤', { n }), 'success');
+  };
+  // 皮肤还原：清掉全部已选皮肤（与「全部恢复默认」独立——后者只动技能/模组/潜能）
+  const resetSkinsAll = async () => {
+    if (!skinCount) return;
+    const ok = await confirmDialog({ title: t('皮肤还原'), text: t('清除全部 {n} 名干员的已选皮肤，恢复默认外观？', { n: skinCount }), okText: t('皮肤还原'), danger: true });
+    if (ok) { clearAllSkins(); toast(t('已清除全部皮肤'), 'success'); }
   };
 
   // 导出 / 导入 the loadout (or, on the 干员持有 tab, the not-owned list) as the versioned payload (a downloaded file,
@@ -697,6 +720,8 @@ function LoadoutScreen({ st }) {
         <${Button} variant="ghost" size="sm" data-testid="loadout-export" disabled=${!nChanged && !Object.keys(st.ops || {}).length} onClick=${openExport} title=${t('导出当前调配（可复制或下载）')}>${t('导出')}<//>
         <${Button} variant="ghost" size="sm" data-testid="loadout-import" disabled=${!ready} onClick=${openImport} title=${t('导入调配（粘贴或选择文件）')}>${t('导入')}<//>
         <${Button} variant="secondary" size="sm" icon="refresh" disabled=${!nChanged} onClick=${resetAll}>${t('全部恢复默认')}<//>
+        <${Button} variant="secondary" size="sm" data-testid="skin-all" disabled=${!nSkin} onClick=${oneClickSkins} title=${t('给每名有皮肤的干员套上第一款皮肤')}>${t('一键换装')}<//>
+        <${Button} variant="ghost" size="sm" icon="refresh" data-testid="skin-reset" disabled=${!skinCount} onClick=${resetSkinsAll} title=${t('清除全部已选皮肤')}>${t('皮肤还原')}<//>
       </div>`}
     </header>
     ${tab === 'diy'
