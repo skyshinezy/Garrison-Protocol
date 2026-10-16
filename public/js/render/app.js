@@ -119,7 +119,12 @@ import { Camera, presetCamera, lerpCamera, easeInOutCubic, pickTile, normRect } 
 import { SnapshotBuffer, frameTime } from './interp.js';
 import { TileField } from './tiles.js';
 import { UnitView, ItemView, DeviceView, FORMS, syncView } from './units.js';
-import { FxSystem, ensureDamageFonts } from './fx.js';
+import { FxSystem, ensureDamageFonts, projSpeed } from './fx.js';
+import { OfficialFx } from './vfx/system.js';
+import { FxWiring } from './vfx/wiring.js';
+import { resolveOfficialFx } from './vfx/tier.js';
+// fx.damage / fx.heal option: the official effect drew the hit (no procedural spark, slash or glow; numbers stay).
+const NO_SPARK = Object.freeze({ noSpark: true });
 import { createDragController, pieceTile, dragStandTile } from './drag.js';
 import { backdropTextures, shadowTexture, refreshTierChips, refreshDownLabels, silhouetteTexture } from './textures.js';
 import { TILE_H, TIER_COLORS, COLORS } from './style.js';
@@ -162,7 +167,7 @@ export async function createFieldView(host, options = {}) {
   signal?.throwIfAborted();
   const assets = resolveAssets(opts.assets);
   const data = makeData(opts.data);
-  const settings = { damageNumbers: true, officialDamageNumbers: false, quality: 'high', ...(opts.settings || {}) };
+  const settings = { damageNumbers: true, officialDamageNumbers: false, quality: 'high', officialFx: 'auto', ...(opts.settings || {}) };
   // the 3D board (three.js + the official art) loads in parallel with everything else
   const boardPref = boardPreference(opts.board);
   const want3d = boardPref !== '2d' && webgl2Available(boardPref === '3d');
@@ -342,6 +347,32 @@ export async function createFieldView(host, options = {}) {
   });
   setupCleanup.push(() => fx.destroy());
   ctx.fx = fx;
+  // the official battle effects (设置「官方特效」, render/vfx): drawn on the 3D board only (the 2D board fallback keeps the
+  // procedural fx), on the battle clock; their files load on demand (data/local-fx.json)
+  const ofx = new OfficialFx({ P, renderer: app.renderer, assets, cam: () => cam, heightAt });
+  setupCleanup.push(() => ofx.destroy());
+  layers.groundFx.addChild(ofx.ground);
+  layers.fxAdd.addChild(ofx.over);
+  const wiring = new FxWiring(ofx, {
+    speed: projSpeed,
+    // the index unit of a battle unit: the drawn operator (a stand-in's, a 自选 pick's), the chess' operator, the enemy / token
+    unitKey: (info) => {
+      if (!info) return null;
+      const c = info.side === 'ally' && info.kind === 'op' && !info.standInFor && !info.diy ? data.chess(info.defId) : null;
+      return [info.diy?.charId, info.spine, c?.charId, info.defId].filter(Boolean);
+    },
+    // the unit's data record (its skill: render/vfx/skills.js resolves the official skill and its plan from it)
+    record: (info) => (info ? ctx.lookupDef(info) : null),
+    // a battle view by id (the skill effects a kit fx stands for may land on its target)
+    view: (id) => views.get(id) || null,
+  });
+  ctx.ofx = ofx;
+  let ofxPrevT = null;        // renderT of the last effects step (the battle clock)
+  /** The tier the effects run at now: the setting (auto: 精简 on touch devices) while the 3D board draws. */
+  function syncOfficialFx() {
+    ofx.setTier(board3d ? resolveOfficialFx(settings.officialFx, ofx.available) : 'off');
+  }
+  ofx.init().then((ok) => { if (!destroyed && ok) { syncOfficialFx(); wiring.ready(); } }, () => {});
   // battle devices (crates / turrets as sim units): the official crate mesh in the 3D scene, else a Pixi box
   ctx.createBox = () => switchableBox({ board: () => board3d, pixi: () => tiles.createBox() });
   const impostors = new ImpostorAtlas(app.renderer);
@@ -395,6 +426,7 @@ export async function createFieldView(host, options = {}) {
       tiles.project(cam, true);
       recover.since = performance.now();
       for (const [g, r] of hlReq) drawHighlight(r.tiles, r.style, g);
+      syncOfficialFx();
       return true;
     } catch (err) {
       board3dError = String(err?.message || err);
@@ -412,6 +444,7 @@ export async function createFieldView(host, options = {}) {
     if (!destroyed) {
       tiles.setExternal(false); backdrop.visible = true; tiles.project(cam, true);
       for (const [g, r] of hlReq) drawHighlight(r.tiles, r.style, g);
+      syncOfficialFx();
     }
   }
   /**
@@ -881,6 +914,7 @@ export async function createFieldView(host, options = {}) {
     battleMeta = null;
     interp.reset();
     fx.clear();
+    ofx.clear(); wiring.clear();
     meleePending.clear();
     consumedIds.clear();
     tiles.setBattleRect(null);
@@ -1332,6 +1366,7 @@ export async function createFieldView(host, options = {}) {
     gone.clear();
     interp.reset();
     fx.clear();
+    ofx.clear(); wiring.clear(); ofxPrevT = null;
     meleePending.clear();
     consumedIds.clear();
     clearHl();
@@ -1351,6 +1386,12 @@ export async function createFieldView(host, options = {}) {
     tiles.setBattleRect(rect);
     board3d?.setBattleRect(rect);
     for (const u of Array.isArray(meta.units) ? meta.units : []) addInfo(u);
+    // the official effects of this battle's units load now (the prep → battle switch), the board's heights for their
+    // depth-tested materials
+    if (ofx.active && !battleMeta.prep) {
+      ofx.setGround(heightAt, stageRec?.id ?? null);
+      wiring.begin([...infos.values()].map((info) => ({ id: info.id, info }))).catch(() => {});
+    }
     return true;
   }
 
@@ -1406,11 +1447,15 @@ export async function createFieldView(host, options = {}) {
     if (!Array.isArray(list)) return 0;
     // spawn infos are needed as soon as possible (a snapshot may reference the unit first); a placeholder view made
     // for a snapshot unit nobody announced is rebuilt with the real info
+    let fresh = null;
     for (const e of list) {
       if (!Array.isArray(e) || e[0] !== 'spawn') continue;
       const info = addInfo(e[1]);
       if (info && views.get(info.id)?._unknown) dropView(info.id);
+      if (info && ofx.active) (fresh || (fresh = [])).push({ id: info.id, info });
     }
+    // the official effects of units joining the battle load ahead of their first attack (render/vfx/wiring.js more)
+    if (fresh) wiring.more(fresh);
     return interp.pushEvents(list, performance.now() / 1000, t);
   }
 
@@ -1448,12 +1493,13 @@ export async function createFieldView(host, options = {}) {
         gone.delete(info.id);
         const v = battleView(info.id);
         if (v && info.side === 'enemy' && renderT0Battle != null && now - renderT0Battle > 0.2) fx.ring(info.x, info.y, 0, 0.1, 0.7, 0xff5a4a, 0.4);
+        if (v) wiring.spawned(v);
         break;
       }
       case 'deploy': {
         gone.delete(e[1]);
         const v = battleView(e[1]);
-        if (v) { v.onDeploy?.(); if (v.info?.kind !== 'device') fx.deploy(v); }
+        if (v) { v.onDeploy?.(); if (v.info?.kind !== 'device' && !wiring.deploy(v)) fx.deploy(v); }
         break;
       }
       case 'atk': {
@@ -1462,7 +1508,10 @@ export async function createFieldView(host, options = {}) {
         // chain / chainHeal bounces: the "source" is the previous target of the bounce, not an attacker
         if (src && !CHAIN_KINDS.has(e[3])) src.onAttack?.(tgt, now, e[3]);
         if (e[3] === 'none' || !e[3]) { if (tgt && src) meleePending.set(tgt.id, { src, t: now }); }
-        fx.attack(src, tgt, e[3]);
+        // the unit's official attack (casts, projectile, melee hits — render/vfx/wiring.js) or a chain's bounce (the line of
+        // the official shot that opened the chain: wiring.chain), else the procedural one
+        const drew = !!src && (CHAIN_KINDS.has(e[3]) ? wiring.chain(src, tgt, e[3], now) : wiring.attack(src, tgt, e[3], now, woundUp.has(e)));
+        if (!drew) fx.attack(src, tgt, e[3]);
         break;
       }
       case 'dmg': {
@@ -1472,22 +1521,25 @@ export async function createFieldView(host, options = {}) {
         const m = meleePending.get(v.id);
         let src = null;
         if (m && now - m.t < 0.35) { src = m.src; meleePending.delete(v.id); fx._slashAt = src.id; }
-        fx.damage(v, amt, e[3], src, e[4]);
+        // an official hit drawn for this damage replaces the procedural spark / slash (the numbers stay)
+        const official = wiring.damage(v, e[3], src, now);
+        fx.damage(v, amt, e[3], src, e[4], official ? NO_SPARK : undefined);
         break;
       }
-      case 'heal': { const v = views.get(e[1]); if (v) fx.heal(v, Number(e[2]) || 0); break; }
-      case 'skill': { const v = views.get(e[1]); if (v) { v.setSkill?.(!!e[2]); fx.skill(v, !!e[2]); } break; }
+      case 'heal': { const v = views.get(e[1]); if (v) fx.heal(v, Number(e[2]) || 0, wiring.heal(v, now) ? NO_SPARK : undefined); break; }
+      case 'skill': { const v = views.get(e[1]); if (v) { v.setSkill?.(!!e[2]); if (!wiring.skill(v, !!e[2]) || !e[2]) fx.skill(v, !!e[2]); } break; }
       // the skill slot an enemy ability casts (PR #275): the view swaps to that slot's clip (a multi-skill boss's Skill_01..04)
-      case 'cast': { const v = views.get(e[1]); if (v) v.setSkillSlot?.(e[2] | 0); break; }
+      case 'cast': { const v = views.get(e[1]); if (v) { v.setSkillSlot?.(e[2] | 0); wiring.enemyCast(v, e[2] | 0, Number(e[3]) || 0); } break; }
       case 'die': {
         const v = views.get(e[1]);
         const used = consumedIds.delete(e[1]);
-        if (v && v.alive) { v.die(e[2] === FORCED_EXIT); if (showsDeathFx(v.info, used, e[2])) fx.death(v); }
+        if (v && v.alive) { v.die(e[2] === FORCED_EXIT); if (showsDeathFx(v.info, used, e[2])) { if (!wiring.death(v)) fx.death(v); } else wiring.release(v); }
         break;
       }
       case 'leak': {
         const v = views.get(e[1]);
         if (v) {
+          wiring.release(v);
           leakFlash(v.x, v.y);
           v.alive = false;
           v.dying = 0.25; v.dieDur = 0.25;
@@ -1495,7 +1547,7 @@ export async function createFieldView(host, options = {}) {
         fx.leak();
         break;
       }
-      case 'status': { const v = views.get(e[1]); if (v) v.onStatus?.(e[2], !!e[3]); break; }
+      case 'status': { const v = views.get(e[1]); if (v) { v.onStatus?.(e[2], !!e[3]); wiring.status(v, e[2], !!e[3]); } break; }
       case 'fx': {
         if (e[4] && typeof e[4] === 'object' && e[4].consumed && e[4].id != null) {
           consumedIds.add(e[4].id);
@@ -1520,13 +1572,19 @@ export async function createFieldView(host, options = {}) {
         // without its telegraph, its closing clip shortened by the lateness.
         const form = fxForm(e);
         const late = form !== undefined ? LATE.get(e) || 0 : 0;
+        let officialForm = false;
         if (form !== undefined) {
           const inf = infos.get(e[4].id);
           if (inf && (form === null || FORMS[inf.spine || inf.defId]?.[form])) inf.form = form;
           const x = late > 0 ? { ...e[4], late, ...(Number(e[4].dur) > 0 ? { dur: Math.max(0, Number(e[4].dur) - late) } : {}) } : e[4];
-          views.get(e[4].id)?.setForm?.(form, x);
+          const fv = views.get(e[4].id);
+          fv?.setForm?.(form, x);
+          // the unit's attack mode from now on and its talents' 重生 rows (render/vfx/wiring.js form, talentfx.js)
+          if (fv) officialForm = wiring.form(fv, form, x);
         }
-        if (!(late > 0)) fx.simFx(e[1], Number(e[2]), Number(e[3]), e[4]);
+        // a kit fx the official skill / talent effects stand for (render/vfx/skillfx.js, talentfx.js) is not drawn procedurally
+        const official = !(late > 0) && wiring.simFx(e[1], Number(e[2]), Number(e[3]), e[4]);
+        if (!(late > 0) && !official && !officialForm) fx.simFx(e[1], Number(e[2]), Number(e[3]), e[4]);
         break;
       }
       case 'layer': {
@@ -1720,6 +1778,9 @@ export async function createFieldView(host, options = {}) {
           processEvents(renderT);
           syncBattle(renderT);
           windUpAttacks(renderT);
+          // the official effects advance on the battle clock (render/vfx): new effects fire on the events, then tick and the
+          // 3D board draws them (the 2D board keeps its procedural fx)
+          if (ofx.active) { wiring.sync(views.values()); wiring.tick(); ofx.update(dt); }
         }
       } else if (mode === 'prep') {
         for (const [key, pd] of pending) {
@@ -1910,8 +1971,10 @@ export async function createFieldView(host, options = {}) {
       const q = settings.quality;
       if (typeof s.damageNumbers === 'boolean') settings.damageNumbers = s.damageNumbers;
       if (typeof s.officialDamageNumbers === 'boolean') settings.officialDamageNumbers = s.officialDamageNumbers;
+      if (s.officialFx === 'auto' || s.officialFx === 'off' || s.officialFx === 'lite' || s.officialFx === 'full') settings.officialFx = s.officialFx;
       if (s.quality === 'high' || s.quality === 'medium' || s.quality === 'low') settings.quality = s.quality;
       if (q !== settings.quality) { board3d?.setQuality?.(settings.quality); resize(); }
+      if (!destroyed) syncOfficialFx();
     },
     resize,
     /** Dev / settings: switch the board layer ('3d' loads three.js + the art when available; '2d' = atlas board). */
