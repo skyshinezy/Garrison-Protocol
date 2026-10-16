@@ -4,7 +4,7 @@
 import { DIFFICULTIES, NAME_MAX_LEN, ROOM_CODE_LEN, MAX_SEATS, ROOM_CAPACITIES, MAX_DRAFT_CARDS, EMOTES, GEO } from './constants.js';
 import { isDroppableChess } from './standIn.js';
 import { diySlotIds, validateDiyPicks } from './diy.js';
-import { cultivatedStats, isPotential, isCultivate, POTENTIAL_DEFAULT, CULTIVATE_DEFAULT } from './potential.js';
+import { cultivatedStats, isPotential, isCultivate, POTENTIAL_DEFAULT, CULTIVATE_DEFAULT, hasPotentialData } from './potential.js';
 import { isAssetCacheReadiness } from './assetCache.js';
 import { isChatTextInput } from './matchChat.js';
 
@@ -220,6 +220,27 @@ export function cultivationCharIds(chess, backups = null) {
   }
   for (const id of Array.isArray(backups?.diy?.ownedPool) ? backups.diy.ownedPool : []) if (isId(id)) out.add(id);
   return out;
+}
+
+/**
+ * Whether `charId` (e.g. `char_x_xxx`) has any potential/cultivation data in
+ * `data` (the kind of object passed to loadout sync). Client-only helper used
+ * by loadout sync UI to decide whether a character row can be toggled.
+ * @param {{ chess?: Record<string, any>, backups?: any }|null|undefined} data
+ * @param {string} charId
+ */
+export function charPotentialChanges(data, charId) {
+  if (typeof charId !== 'string' || !charId.startsWith('char_x_')) return true;
+  const chess = data?.chess;
+  if (chess && typeof chess === 'object') {
+    for (const c of Object.values(chess)) if (c?.charId === charId && hasPotentialData(c)) return true;
+  }
+  const unit = data?.backups?.units?.[charId];
+  if (unit) {
+    if (hasPotentialData(unit)) return true;
+    for (const f of Object.values(unit.forms ?? {})) if (hasPotentialData(f)) return true;
+  }
+  return false;
 }
 
 /**
