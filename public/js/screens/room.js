@@ -28,6 +28,10 @@ import { net } from '../net.js';
 import { store, useStore, shallowEqual, emptyMatch, isSpectating } from '../store.js';
 import { difficultyInfo } from './lobby.js';
 import { t, tc } from '../../../shared/i18n.js';
+// Cosmetic plugins (DESIGN §32 P1a): the tag under the title — 「原版」 or 「插件 ×N」 — opens the 插件 panel
+// (ui/pluginPanel.js, loaded on tap) where the host switches the room's plugins. Gameplay-plugin start gating (the
+// room's content-set state machine) is intentionally deferred — cosmetic plugins change no match.
+import { PluginTag } from '../ui/pluginTag.js';
 
 /**
  * Seats padded to the room's capacity (co-op 4–20, solo 1), each null or a seat record.
@@ -377,6 +381,7 @@ export function RoomScreen() {
       <div class="topbar__center">
         <${MicroLabel} tone="mint">${coop ? 'ALLIANCE LOBBY' : 'SOLO SIMULATION'}<//>
         <h1 class="topbar__title">${coop ? t('同盟模拟') : t('独立模拟')}<span class="topbar__sep"></span><${DifficultyTag} difficulty=${room.difficulty} size="lg" /></h1>
+        <${PluginTag} room=${room} myId=${me.playerId} />
       </div>
       <div class="topbar__right">
         ${coop ? html`<${InviteBox} code=${room.code} name=${me.name} difficulty=${room.difficulty} />` : html`<div class="solo-note"><${MicroLabel}>SINGLE OPERATOR<//><span>${t('仅限 1 名博士')}</span></div>`}
