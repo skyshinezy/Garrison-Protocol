@@ -28,8 +28,7 @@ import { Img, RichText, UnitThumb } from '../ui/gameComponents.js';
 import { chessAvatarUrl, chessPortraitUrl, subProfIconUrl, bondIconUrl, moduleTypeIconUrl } from '../ui/assetUrls.js';
 import { GarrisonBlock } from '../ui/detailPanel.js';
 import { data, useData, localAsset, DATA_FILES } from '../data.js';
-import { useStore, shallowEqual } from '../store.js';
-import { skinsStore, applyAllSkins, clearAllSkins, availableSkins, loadSkinData } from '../ui/skins.js';
+import { useStore } from '../store.js';
 import { PHASE } from '../../../shared/constants.js';
 import {
   MODULE_NONE, PROF_ORDER, PROF_NAME, rosterOf, filterRoster, recordsOf, chessOptions, effectiveChoice, setChoice, resetChoice,
@@ -38,8 +37,7 @@ import {
 } from '../ui/loadoutModel.js';
 import { loadoutStore, openLoadout, closeLoadout, setEntries, setOpsMap, applyLoadoutEntries, setNotOwned, applyOwnershipImport, setDiyPicks, applyDiyImport } from '../ui/loadoutSync.js';
 import { OperatorVoice } from '../ui/operatorVoice.js';
-import { SkinSection } from '../ui/skinPicker.js';
-import { CultivationSelects, CultivationSection } from './cultivation.js';
+import { CultivationSelects, CultivationSection, cultivationView, potentialEditable } from './cultivation.js';
 import { cultivationCharIds } from '../../../shared/protocol.js';
 import { atPotential } from '../../../shared/potential.js';
 import { setOwned, notOwnedCount, serializeOwnership, parseOwnershipImport, OWNERSHIP_IMPORT_MAX_BYTES } from '../ui/ownershipModel.js';
@@ -199,7 +197,7 @@ export function RosterHead() {
 export function RosterRow({ m, chess, golden, entries, ops = {}, selected, onPick, onChange, onOps, level = 'normal', notOwned = false }) {
   const choice = effectiveChoice(entries, chess, golden);
   const opt = chessOptions(chess, golden);
-  const cv = opsOf(ops, chess.charId);
+  const cv = cultivationView(chess.charId, ops);
   const changed = choice.changed || cv.changed;
   const modules = [...opt.moduleOptions].sort((a, b) => Number(b.id === MODULE_NONE) - Number(a.id === MODULE_NONE));
   const elite = level === 'elite' && !!golden;
@@ -316,7 +314,8 @@ function Detail({ m, chess, golden, entries, ops = {}, onChange, onOps, onReset,
   if (!chess) return html`<aside class="lo-detail lo-detail--empty"><p class="t-dim">${t('没有符合条件的干员')}</p></aside>`;
   const opt = chessOptions(chess, golden);
   const choice = effectiveChoice(entries, chess, golden);
-  const changed = choice.changed || opsOf(ops, chess.charId).changed;
+  const cv = cultivationView(chess.charId, ops);
+  const changed = choice.changed || cv.changed;
   const modOpt = opt.moduleOptions.find((x) => x.id === choice.module) || null;
   const lv = (c) => c?.status?.skillLevel ?? '—';
   return html`<aside class="lo-detail" aria-label=${t('{name} 调配', { name: chess.name })}>
@@ -356,7 +355,6 @@ function Detail({ m, chess, golden, entries, ops = {}, onChange, onOps, onReset,
         </div>
       </section>
       <${LoadoutStats} base=${chess} golden=${golden} entries=${entries} ops=${ops} level=${statLevel} onLevel=${setStatLevel} />
-      <${SkinSection} chess=${chess} />
       ${golden ? html`<section class="lo-sec lo-sec--mod">
         <header class="lo-sec__head">
           <h3>${t('模组')}<${MicroLabel}>MODULE<//></h3>
@@ -374,7 +372,7 @@ function Detail({ m, chess, golden, entries, ops = {}, onChange, onOps, onReset,
             ${mo.isDefault ? html`<span class="lo-badge lo-badge--def lo-mod__def">${t('默认')}</span>` : null}
           </button>`)}
         </div>
-        ${modOpt ? html`<${ModuleInfo} m=${m} golden=${golden} opt=${modOpt} potential=${opsOf(ops, chess.charId).potential} />` : null}
+        ${modOpt ? html`<${ModuleInfo} m=${m} golden=${golden} opt=${modOpt} potential=${cv.potentialOn ? cv.potential : null} />` : null}
       </section>` : null}
       ${notOwned ? html`<p class="lo-locknote lo-locknote--standin" data-testid="loadout-standin-note"><${Icon} name="info" />${standInName(chess) ? t('干员持有中标记为未持有：此棋子由替补干员 {name} 上场，技能与模组固定（补位干员技能不可更改）；这里的调配在改回「持有」后生效', { name: standInName(chess) })
         : t('干员持有中标记为未持有：此棋子由替补干员上场，技能与模组固定（补位干员技能不可更改）；这里的调配在改回「持有」后生效')}</p>` : null}
@@ -480,7 +478,7 @@ export function DataMissing({ files }) {
 
 /** The overlay screen. */
 function LoadoutScreen({ st }) {
-  const ready = useData('chess', 'bonds', 'assets', 'local', 'backups', 'garrisons', 'effects', 'skins');
+  const ready = useData('chess', 'bonds', 'assets', 'local', 'backups', 'garrisons', 'effects');
   const phase = useStore((s) => s.match?.public?.phase || null);
   const inMatch = useStore((s) => !!s.room?.inMatch);
   // co-op briefing (INFO_CHECK, 25 s): the overlay covers the briefing's own countdown, so it shows the time left — the
@@ -495,18 +493,12 @@ function LoadoutScreen({ st }) {
     return (data.list('bonds') || []).filter((b) => b && used.has(b.bondId))
       .sort((a, b) => (b.isCore ? 1 : 0) - (a.isCore ? 1 : 0) || (a.bondOrder ?? 0) - (b.bondOrder ?? 0) || String(a.name).localeCompare(String(b.name), 'zh'));
   }, [ready, roster]);
-  const list = filterRoster(roster, st.filters, st.entries, getChess, getBond, st.ops);
+  const list = filterRoster(roster, st.filters, st.entries, getChess, getBond, st.ops, potentialEditable);
   const selId = st.sel && roster.some((c) => c.chessId === st.sel) ? st.sel : list[0]?.chessId || roster[0]?.chessId || null;
   const { base, golden } = selId ? recordsOf(selId, getChess) : { base: null, golden: null };
-  const nChanged = changedCount(st.entries, getChess, st.ops, roster);
+  const nChanged = changedCount(st.entries, getChess, st.ops, roster, potentialEditable);
   const locked = (inMatch && phase && phase !== PHASE.INFO_CHECK && phase !== PHASE.LOBBY) || st.sync === 'locked';
   const gridRef = useRef(null);
-  // 皮肤：随调配界面一并载入目录（与详情面板的 SkinSection 共用同一份数据），并统计有皮肤的干员数 / 已选数
-  useEffect(() => { loadSkinData(); }, []);
-  const skinReady = data.status('skins') === 'ready';
-  const nSkin = skinReady ? roster.filter((c) => { const l = availableSkins(c.charId); return l && l.length; }).length : 0;
-  const skinEntries = useStore((s) => s.entries, shallowEqual, skinsStore);
-  const skinCount = Object.keys(skinEntries).length;
   const fileRef = useRef(null);                            // hidden <input type=file> of the 导入 dialog
   const [narrowDetail, setNarrowDetail] = useState(false); // phones: the detail slides over the roster
   // the detail's 普通 / 精锐 skill toggle: one preview for its skills, its 特质 and the rows' skill details (display only)
@@ -558,18 +550,6 @@ function LoadoutScreen({ st }) {
     for (const [id, e] of Object.entries(loadoutStore.get().ops || {})) if (!rosterChars.has(id)) keep[id] = e;
     setOpsMap(keep);
     setEntries({});
-  };
-  // 一键换装：给每名有皮肤的干员套上第一款皮肤（覆盖其现有选择）
-  const oneClickSkins = () => {
-    if (!nSkin) return;
-    const n = applyAllSkins(roster);
-    if (n) toast(t('已为 {n} 名干员换上皮肤', { n }), 'success');
-  };
-  // 皮肤还原：清掉全部已选皮肤（与「全部恢复默认」独立——后者只动技能/模组/潜能）
-  const resetSkinsAll = async () => {
-    if (!skinCount) return;
-    const ok = await confirmDialog({ title: t('皮肤还原'), text: t('清除全部 {n} 名干员的已选皮肤，恢复默认外观？', { n: skinCount }), okText: t('皮肤还原'), danger: true });
-    if (ok) { clearAllSkins(); toast(t('已清除全部皮肤'), 'success'); }
   };
 
   // 导出 / 导入 the loadout (or, on the 干员持有 tab, the not-owned list) as the versioned payload (a downloaded file,
@@ -650,7 +630,7 @@ function LoadoutScreen({ st }) {
       // (a row's quick choices: ←/→ stay with the focused group, PR #301)
       if (e.target?.closest?.('.lo-quick') && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) return;
       if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && loadoutStore.get().tab !== 'ownership' && loadoutStore.get().tab !== 'diy') {
-        const ids = filterRoster(rosterOf(data.list('chess')), loadoutStore.get().filters, loadoutStore.get().entries, getChess, getBond, loadoutStore.get().ops).map((c) => c.chessId);
+        const ids = filterRoster(rosterOf(data.list('chess')), loadoutStore.get().filters, loadoutStore.get().entries, getChess, getBond, loadoutStore.get().ops, potentialEditable).map((c) => c.chessId);
         if (!ids.length) return;
         const cur = Math.max(0, ids.indexOf(loadoutStore.get().sel));
         const next = ids[(cur + (e.key === 'ArrowRight' ? 1 : -1) + ids.length) % ids.length];
@@ -717,8 +697,6 @@ function LoadoutScreen({ st }) {
         <${Button} variant="ghost" size="sm" data-testid="loadout-export" disabled=${!nChanged && !Object.keys(st.ops || {}).length} onClick=${openExport} title=${t('导出当前调配（可复制或下载）')}>${t('导出')}<//>
         <${Button} variant="ghost" size="sm" data-testid="loadout-import" disabled=${!ready} onClick=${openImport} title=${t('导入调配（粘贴或选择文件）')}>${t('导入')}<//>
         <${Button} variant="secondary" size="sm" icon="refresh" disabled=${!nChanged} onClick=${resetAll}>${t('全部恢复默认')}<//>
-        <${Button} variant="secondary" size="sm" data-testid="skin-all" disabled=${!nSkin} onClick=${oneClickSkins} title=${t('给每名有皮肤的干员套上第一款皮肤')}>${t('一键换装')}<//>
-        <${Button} variant="ghost" size="sm" icon="refresh" data-testid="skin-reset" disabled=${!skinCount} onClick=${resetSkinsAll} title=${t('清除全部已选皮肤')}>${t('皮肤还原')}<//>
       </div>`}
     </header>
     ${tab === 'diy'
@@ -819,7 +797,7 @@ export function LoadoutHost() {
  * @param {Record<string, any>|null} [ops] @param {any[]|null} [roster] rosterOf(…) of the loaded data
  */
 export function badgeCount(entries, getChess, ops = null, roster = null) {
-  return getChess ? changedCount(entries, getChess, ops, roster) : Object.keys(entries || {}).length + Object.keys(ops || {}).length;
+  return getChess ? changedCount(entries, getChess, ops, roster, potentialEditable) : Object.keys(entries || {}).length + Object.keys(ops || {}).length;
 }
 
 /**

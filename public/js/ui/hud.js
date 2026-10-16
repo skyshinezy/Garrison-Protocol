@@ -12,13 +12,14 @@
 // overtimeState): "NN 秒后全队生命值开始流失" once the level time ran out, then a live "生命值 −1/秒" indicator while the
 // merged team LP drains (the LP tower turns red). Solo battles: a pause / resume button beside the countdown (g.pause);
 // while m.public.paused every clock here is frozen at the pause moment (`frozenAt`).
-// Normal rounds (user playtest #3 item 2): the LP tower drops live as the own battle's enemies enter the blue gate —
-// lp − min(lpCapPerRound, counted leaks) in red with a −N tick, 联防中 while a 联防 may still save part of it (liveLp;
+// Normal rounds (user playtest #3 item 2): the LP tower marks the own battle's leaks live as its enemies enter the blue
+// gate — the settled lp stays until settlement, in red with a −min(lpCapPerRound, counted leaks) tick (GitHub #479: the
+// official keeps the current value until settlement), 联防中 while a 联防 may still save part of it (liveLp;
 // the leaks come from the local battle runner, else m.public players[].pendingLp). 联防 (user playtest #6 item 7; PRTS
 // 卫戍协议/帮助 "防卫失败的玩家可通过上方信息栏确认自身所属敌人的剩余数量"): a leaker's phase capsule carries the official
 // runner tag ×N (research 09 `tag_miss`; art ui/battle bg_miss_enemy [ASSUMED]) = its enemies still standing on the 联防
 // field, uncapped and live — falling as the helpers kill them, rising when one splits or summons (the local 联防
-// replica's runner state().uniteLeft, else m.public players[].uniteLeft); the LP tower shows lp − min(lpCapPerRound, N).
+// replica's runner state().uniteLeft, else m.public players[].uniteLeft); the LP tower marks lp with −min(lpCapPerRound, N).
 // The same MissTag sits in the leakers' team rows (ui/teamPanel.js), its tooltip naming the teammate there (missTip).
 // 准备就绪 is refused while the temp overflow row (临时整备区) holds pieces: the reason shows under the button
 // (user playtest #3 item 3; the row's own label is ui/underframe.js TempRowNotice).
@@ -33,6 +34,7 @@ import { isCombatPhase, isBossPhase, prepCapsuleLabel, bossFrac, bossPctText, fm
 import { overtimeState, overtimeDrainPerSec, remainAt } from './matchStatus.js';
 import { hotkeyLabelOf } from './settings.js';
 import { t, tParts, N_ } from '../../../shared/i18n.js';
+import { UnofficialMark } from './pluginTag.js';
 
 const cx = (...p) => p.flat().filter(Boolean).join(' ');
 
@@ -101,10 +103,6 @@ export function PhaseCapsule({ pub, hud, miss = null }) {
         fallback=${html`<${Icon} name="sword" class="capsule__icon" />`} />
       <span class="capsule__kills num"><b>${hud?.resolved ?? hud?.killed ?? 0}</b>/${hud?.total ?? '--'}</span>
       ${phase === PHASE.UNITE ? html`<span class="capsule__tag">${t('联防')}</span>` : null}
-      ${phase === PHASE.UNITE && Number.isInteger(pub?.unite?.round) && pub.unite.roundsMax > 1
-        ? html`<span class="capsule__wave num" data-testid="unite-wave"
-          title=${t('第 {wave} 轮联防 · 最多 {max} 轮', { wave: pub.unite.round, max: pub.unite.roundsMax })}>
-          ${pub.unite.round}/${pub.unite.roundsMax}</span>` : null}
       ${phase === PHASE.UNITE && Number.isFinite(miss) ? html`<${MissTag} n=${miss} />` : null}
     </div>`;
   }
@@ -187,9 +185,10 @@ export function uniteRemaining(local, server) {
 }
 
 /**
- * The own LP while a normal round's battle runs: the loss its counted leaks will cost is shown at once (red, −N)
- * instead of only at settlement. `base` — kept by the caller between renders — is the settled m.private state the
- * pending loss applies to: { round, lp, statsLeaks } as first seen in the round's COMBAT / 联防. The pending part is
+ * The own LP while a normal round's battle runs: the loss its counted leaks will cost is marked at once (red, −N) instead
+ * of only at settlement — the number itself keeps the settled LP until settlement (GitHub #479: the official shows the
+ * current value, not the deduction, until the round settles). `base` — kept by the caller between renders — is the
+ * settled m.private state the pending loss applies to: { round, lp, statsLeaks } as first seen in the round's COMBAT / 联防. The pending part is
  * dropped as soon as the settlement lands — m.private lp or stats.leaks changed (Match.flush sends m.private before the
  * SETTLE m.public) — or the phase leaves COMBAT / UNITE or the round changes, so the loss is never subtracted twice.
  * 联防 (UNITE): a leaker finally loses min(cap, the survivors of the 联防 battle that came from them); `uniteLeft` (its
@@ -353,16 +352,16 @@ export function PauseButton({ paused, busy = false, onToggle }) {
  *   pen?:boolean, penAvail?:boolean, onPen?:(on:boolean)=>void, config?: any, frozenAt?: number|null,
  *   pause?: { show: boolean, paused: boolean, busy?: boolean, onToggle: () => void } | null,
  *   live?: { pending: number, unite: boolean, left?: number|null } | null,
- *   spectator?: boolean, spectators?: any[]|null, myId?: any, isHost?: boolean,
- *   onRemoveSpectator?: ((playerId: any) => any)|null, onUniteSkipVote?: (scope?: { voteId?: string }) => any }} props
+ *   spectators?: any[]|null, myId?: any, isHost?: boolean, onRemoveSpectator?: ((playerId: any) => any)|null }} props
  *   spectators: the room's spectator seats (room.state) — the 观战席 capsule beside the latency (SpectatorPill; the host removes)
+ *   room: room.state — a match with gameplay plugins shows the small MOD mark beside the difficulty (DESIGN §32.6)
  *   frozenAt: the server time every clock shows while the solo match is paused (null = live)
- *   live: the own battle's pending LP loss (liveLp): the tower shows lp − pending in red with a −N tick, 联防中 during 联防;
+ *   live: the own battle's pending LP loss (liveLp): the tower keeps the settled lp and adds a red −N tick, 联防中 during 联防;
  *     `left` (a leaker in 联防): its enemies still standing — the capsule's ×N tag
  */
 export function TopBar({ pub, priv, conn, hud, total, drawer, onExit, onDrawer, onReady, readyBusy, readyCount, playerCount, pen = false, penAvail = false, onPen = () => {},
   config = null, frozenAt = null, pause = null, live = null, spectator = false,
-  spectators = null, myId = null, isHost = false, onRemoveSpectator = null, onUniteSkipVote = () => {} }) {
+  spectators = null, myId = null, isHost = false, onRemoveSpectator = null, room = null }) {
   const phase = pub?.phase;
   const boss = isBossPhase(phase);
   const lp = boss && Number.isFinite(pub?.teamLp) ? pub.teamLp : Number.isFinite(priv?.lp) ? priv.lp : null;
@@ -393,6 +392,7 @@ export function TopBar({ pub, priv, conn, hud, total, drawer, onExit, onDrawer, 
           <${SpectatorPill} spectators=${spectators} myId=${myId} isHost=${isHost} onRemove=${onRemoveSpectator} />
         </div>
         ${pub?.difficulty ? html`<${DifficultyTag} difficulty=${pub.difficulty} size="sm" />` : null}
+        <${UnofficialMark} room=${room} compact=${true} class="gtop__mod" />
       </div>
     </div>
 
@@ -422,28 +422,9 @@ export function TopBar({ pub, priv, conn, hud, total, drawer, onExit, onDrawer, 
         ${pause && (pause.show || pause.paused) ? html`<${PauseButton} paused=${!!pause.paused} busy=${pause.busy} onToggle=${pause.onToggle} />` : null}
       </div>
       <${OvertimeWarning} ot=${ot} />
-      <${UniteSkipVote} pub=${pub} myId=${myId} onVote=${onUniteSkipVote} />
       ${showReady ? html`<${ReadyToggle} priv=${priv} onToggle=${onReady} busy=${readyBusy} readyCount=${readyCount} total=${playerCount} />` : null}
     </div>
   </header>`;
-}
-
-/** Vote status remains visible to the team; only eligible human seats can cast a vote. */
-export function UniteSkipVote({ pub, myId, onVote }) {
-  const unite = pub?.unite;
-  const vote = unite?.skipVote;
-  if (pub?.phase !== PHASE.UNITE || unite?.round >= unite?.roundsMax || !vote) return null;
-  const eligible = vote.eligible.includes(myId);
-  const voted = vote.voters.includes(myId);
-  return html`<div class="unite-vote" role="status">
-    <${Button} variant="secondary" size="sm" disabled=${!eligible || voted || vote.passed || !vote.open}
-      onClick=${() => onVote?.(vote.id == null ? {} : { voteId: vote.id })} data-testid="unite-skip-vote"
-      title=${t('超过半数在线且未托管的人类玩家同意后，本轮打完就跳过后续全部联防，剩余漏怪照常扣除目标生命值')}>
-      ${vote.passed ? t('已通过：跳过后续全部联防') : voted ? t('已投票跳过后续全部联防') : t('投票跳过后续全部联防')}
-    <//>
-    <span class="unite-vote__count">${vote.passed ? t('本轮结束后直接结算')
-      : vote.eligible.length ? t('{votes}/{eligible} 票 · 需 {needed} 票', { votes: vote.voters.length, eligible: vote.eligible.length, needed: vote.needed }) : t('暂无可投票玩家')}</span>
-  </div>`;
 }
 
 /** DP counter shown at the right edge during combat. */

@@ -28,6 +28,9 @@
 // Language (ui/lang.js, docs/I18N.md): chosen before the first render (initLang); App re-renders on a switch (useLang).
 // Server texts are translated on arrival: m.toast / m.ticker frames (msgid + params, or the text as a msgid; a
 // config.broadcasts line from its id + args), error codes (ui/toasts.js describeError) and room.closed reasons.
+// Cosmetic plugins (DESIGN §32 P1a): installContent (content.js) lays the room's visual set and the player's personal
+// plugins over the art manifest every screen reads. Gameplay plugins (§32.6): installContentSet (content.js) downloads and
+// checks a room's content set and makes it the data every screen and the battle runner read.
 
 // Polyfills first (older Safari / Firefox ESR): every module evaluated after this one sees them.
 import './ui/compat.js';
@@ -35,44 +38,36 @@ import { render } from '../vendor/preact.module.js';
 import { useErrorBoundary } from '../vendor/hooks.module.js';
 import { html, UiHosts, Button, MicroLabel, closeAllDialogs } from './ui/components.js';
 import { ConnectionBanner } from './ui/connBanner.js';
-import { EmergencyBanner } from './ui/emergencyBanner.js';
 import { ToastHost, toast, toastError, describeError } from './ui/toasts.js';
 import { net, identity, NetError } from './net.js';
-import { store, useStore, emptyMatch, selectRoute, sessionResetNotice, isSpectating, emergencyActive } from './store.js';
+import { store, useStore, emptyMatch, selectRoute, sessionResetNotice, isSpectating } from './store.js';
 import { data } from './data.js';
 import { GAME_FILES } from './ui/gameComponents.js';
 import { TitleScreen, sanitizeName } from './screens/title.js';
 import { LobbyScreen, rememberRoom, parseRoomParam } from './screens/lobby.js';
-import { RoomScreen } from './screens/room.js';
+import { RoomScreen, TrustedNotice } from './screens/room.js';
 import { GameScreen } from './screens/game.js';
-import { installAudio } from './audio.js';
+import { audio, installAudio } from './audio.js';
 import { settingsStore } from './ui/settings.js';
 import { GuideHost } from './ui/guide.js';
-import { AnnouncementHost, installAnnouncements } from './ui/announcements.js';
-import { UrgentAnnouncementHost, installUrgentAnnouncements } from './ui/urgentAnnouncements.js';
-import { AssetCacheHost, installAssetCache } from './ui/assetCache.js';
 import { installDeviceSupport } from './ui/device.js';
+import { registerImportedAssetWorker } from './assetCache.js';
 import { LoadoutHost } from './screens/loadout.js';
 import { StatsHost } from './screens/stats.js';
+import { installRehearsal } from './battle/rehearsal.js';
 import { recordResult, installStatsRecorder } from './ui/stats.js';
 import { installLoadoutSync, installOwnershipSync, installDiySync } from './ui/loadoutSync.js';
-import { installSkinsSync } from './ui/skins.js';
 import { startBuildGuard } from './ui/buildGuard.js';
-// Cosmetic plugins (DESIGN §32 P1a): content.js lays the room's visual set and the player's personal plugins over the
-// art manifest every screen reads; the catalogue is fetched only when the server actually has plugins.
-import { installContent, installContentSet } from './content.js';
-import { cosmetics } from './cosmetics.js';
-import { MAX_SEATS } from '../../shared/constants.js';
 import { initLang, useLang, tickerText } from './ui/lang.js';
 import { t, N_, translateWire } from '../../shared/i18n.js';
-import { recordError } from './diag.js';
-import { installMatchChat } from './matchChat.js';
-import { assetCache } from './assetCache.js';
+import { recordError, installTrafficMeter } from './diag.js';
+import { installContent, installContentSet } from './content.js';
+import { cosmetics } from './cosmetics.js';
 
 const RESTORE_GRACE_MS = 1500;
 const JOIN_DELAY_MS = 350;
 const TICKER_KEEP = 20;
-const EMOTE_KEEP = MAX_SEATS * 4; // keep several seconds of messages even when every seat sends together
+const EMOTE_KEEP = 20;
 
 const SCREENS = { title: TitleScreen, lobby: LobbyScreen, room: RoomScreen, game: GameScreen };
 
@@ -100,6 +95,8 @@ let matchAt = 0;
 let restoreTimer = null;
 let joinTimer = null;
 let joinInFlight = false;
+/** The rehearsal installer (battle/rehearsal.js): its tasks follow the match on screen (see wireNet's store hook). */
+let rehearsal = null;
 
 function clearPendingJoin() {
   store.patch('ui', { pendingJoin: null });
@@ -142,21 +139,6 @@ function maybeFinishRestore() {
   }
 }
 
-/** Narrow-band emergency recovery may delay the large match snapshot after welcome. */
-function scheduleRestoreExpiry() {
-  clearTimeout(restoreTimer);
-  if (!store.get().ui.restoring || emergencyActive()) return;
-  restoreTimer = setTimeout(() => {
-    if (emergencyActive()) return;
-    const s = store.get();
-    const patch = {};
-    if (s.room && roomStateAt < welcomeAt) patch.room = null;
-    if (s.match.public && matchAt < welcomeAt) patch.match = emptyMatch();
-    store.set(patch);
-    store.patch('ui', { restoring: false });
-  }, RESTORE_GRACE_MS);
-}
-
 /**
  * Leave whatever room / match was on screen for the lobby with nothing stale left behind: open imperative dialogs,
  * the post-resume restore timer, ticker lines and emote bubbles of the old match (the battle runner and the 暂离 flag
@@ -175,7 +157,6 @@ function backToLobby() {
 const pluginCount = (content) => (content && Number.isInteger(content.plugins) && content.plugins > 0 ? content.plugins : 0);
 
 function onWelcome(msg) {
-  onEmergency(msg.emergency);
   identity.saveToken(msg.token);
   identity.rememberMatch(null);
   const prev = store.get();
@@ -184,8 +165,9 @@ function onWelcome(msg) {
   identity.saveName(name);
   store.set({
     me: { playerId: msg.playerId ?? null, name, token: typeof msg.token === 'string' ? msg.token : null },
-    // the server's content identity (DESIGN §32): the diagnostics name it; content.js lays the room's visual set over the art
+    // the server's content identity (DESIGN §32): the diagnostics name it (diag.js contentLine)
     content: msg.content && typeof msg.content.vanilla === 'string' ? { vanilla: msg.content.vanilla } : null,
+    // how many unofficial plugins it has (P1a — absent: none; content.js fetches the catalogue only when there are some)
     installedPlugins: pluginCount(msg.content),
   });
   welcomeAt = Date.now();
@@ -199,20 +181,17 @@ function onWelcome(msg) {
   } else if (prev.room || prev.match.public) {
     // Resumed session: the server re-pushes room/match state; drop whatever it doesn't.
     store.patch('ui', { restoring: true });
-    scheduleRestoreExpiry();
+    clearTimeout(restoreTimer);
+    restoreTimer = setTimeout(() => {
+      const s = store.get();
+      const patch = {};
+      if (s.room && roomStateAt < welcomeAt) patch.room = null;
+      if (s.match.public && matchAt < welcomeAt) patch.match = emptyMatch();
+      store.set(patch);
+      store.patch('ui', { restoring: false });
+    }, RESTORE_GRACE_MS);
   }
   schedulePendingJoin();
-}
-
-/** Tiny emergency frames are applied immediately, before any larger match push. */
-function onEmergency(msg) {
-  const wasActive = !!store.get().emergency?.active;
-  const active = msg?.active === true;
-  store.set({ emergency: active ? { active: true, reason: msg.reason || 'bandwidth',
-    since: Number.isFinite(msg.since) && msg.since > 0 ? msg.since : net.serverNow(),
-    ...(Number.isFinite(msg.retryAt) ? { retryAt: msg.retryAt } : {}) } : null });
-  assetCache.setEmergency(active);
-  if (wasActive && !active) toast(t('服务器带宽紧急保护已解除，对局继续；在线补齐需手动恢复'), 'success', { ttl: 6000 });
 }
 
 function onRoomState(msg) {
@@ -267,16 +246,20 @@ function wireNet() {
     toast(known ? t(known) : typeof msg.reason === 'string' && msg.reason.length < 60 ? t('同盟已关闭：{reason}', { reason: msg.reason }) : t('同盟已关闭'), 'warn');
   });
   net.on('m.public', (msg) => { matchAt = Date.now(); store.patch('match', { public: payload(msg) }); maybeFinishRestore(); });
-  net.on('m.emergency', onEmergency);
   net.on('m.private', (msg) => { matchAt = Date.now(); store.patch('match', { private: payload(msg) }); });
+  net.on('m.layer', (msg) => {
+    const s = store.get();
+    if (selectRoute(s) === 'game' && msg.playerId === s.me?.playerId) audio.layerGain(msg.bondId, msg.add);
+  });
   net.on('m.field', (msg) => store.patch('match', { field: payload(msg) }));
   net.on('m.result', (msg) => {
     const res = payload(msg);
     store.patch('match', { result: res });
     // 本机统计 (PR #323): every arrival, including the lobby's result replay after a reconnect / reload —
     // replays dedupe by content id inside recordResult (spectator seats' copies build no record at all)
-    recordResult(res, { myId: store.get().me.playerId, roomMode: store.get().room?.mode ?? null,
-      vs: store.get().room?.content?.vs ?? null, content: store.get().room?.content ?? null, now: Date.now() });
+    // (`vs`: the room's cosmetic plugins, recorded — such a match still counts as the original game: ui/stats.js)
+    // (`content`: the room's content set when it played gameplay plugins — such a match is unofficial: ui/stats.js)
+    recordResult(res, { myId: store.get().me.playerId, roomMode: store.get().room?.mode ?? null, vs: store.get().room?.content?.vs ?? null, content: store.get().room?.content ?? null, now: Date.now() });
   });
   net.on('m.toast', (msg) => {
     const kind = ['info', 'success', 'warn', 'error'].includes(msg.kind) ? msg.kind : 'info';
@@ -300,11 +283,12 @@ function wireNet() {
 
   // Entering (title → lobby) while already online also needs the deep-link join.
   store.subscribe((s, prev) => {
-    // Stop cleanup immediately on either emergency signal; once both clear, give snapshots a fresh normal grace.
-    if (emergencyActive(s) !== emergencyActive(prev)) scheduleRestoreExpiry();
     if (s.session.entered && !prev.session.entered) schedulePendingJoin();
     // in a room (co-op or solo, also a resumed one) a match is near: its data starts downloading
     if (s.room && !prev.room) warmGameData();
+    // the match on screen is over (left, closed, kicked, a new session): a rehearsal task of it is dead, and the frame
+    // that cancels it may never arrive (a disposed match sends nothing) — the page stops what it is running itself
+    if (selectRoute(prev) === 'game' && selectRoute(s) !== 'game') rehearsal?.clear();
   });
 }
 
@@ -316,7 +300,8 @@ function wireNet() {
  * data store shares each file's promise).
  */
 function warmGameData() {
-  const go = () => { data.loadAll(GAME_FILES).catch(() => {}); };
+  // a room with gameplay plugins: content.js downloads its content set's files instead (DESIGN §32.6)
+  const go = () => { if (store.get().room?.content?.vanilla === false) return; data.loadAll(GAME_FILES).catch(() => {}); };
   if (typeof globalThis.requestIdleCallback === 'function') globalThis.requestIdleCallback(go, { timeout: 2500 });
   else setTimeout(go, 600);
 }
@@ -342,14 +327,11 @@ function App() {
   return html`<div class="app-root">
     <div class="app-bg" aria-hidden="true"></div>
     ${error ? html`<${ScreenCrashed} error=${error} reset=${resetError} />` : html`<${Screen} key=${route} />`}
+    <${TrustedNotice} />
     <${ConnectionBanner} />
-    <${EmergencyBanner} />
     <${ToastHost} />
     <${UiHosts} />
     <${GuideHost} />
-    <${AnnouncementHost} />
-    <${UrgentAnnouncementHost} />
-    <${AssetCacheHost} />
     <${LoadoutHost} />
     <${StatsHost} />
   </div>`;
@@ -389,8 +371,12 @@ function installGlobalErrorHandlers() {
 
 async function boot() {
   installGlobalErrorHandlers();
+  // what this page downloads, by category, for the 问题反馈 report's traffic line (diag.js; nothing is sent anywhere)
+  installTrafficMeter();
   // touch / hover / fullscreen classes, zoom-gesture blocking, rotation re-layout (ui/device.js, css/devices.css)
   installDeviceSupport();
+  // Hashed art a player imported. HTTPS or localhost only; a failure here must not stop boot.
+  void registerImportedAssetWorker();
   // A page restored from the back/forward cache has a dead socket and a stale token choice: start over.
   window.addEventListener('pageshow', (ev) => { if (ev.persisted) location.reload(); });
   // Pick this tab's reconnect token (asks other live tabs; ≤150 ms) while fonts load.
@@ -406,23 +392,26 @@ async function boot() {
   }));
 
   wireNet();
-  installMatchChat({ net, appStore: store });
-  installAnnouncements({ appStore: store, selectRoute, net, restoreGraceMs: RESTORE_GRACE_MS });
-  installUrgentAnnouncements({ net });
-  installAssetCache();
   installStatsRecorder(store); // follows the match on screen, so a 放弃模拟 can be recorded (ui/stats.js)
   installLoadoutSync({ net });
   installOwnershipSync({ net });
   installDiySync({ net });
-  installSkinsSync({ net });
   // the room's cosmetic plugins and the player's own over the art manifest (content.js; nothing is fetched without them)
   installContent({ toast });
+  // a room with gameplay plugins: its content set downloaded, checked and shown (content.js — DESIGN §32.6)
   installContentSet({ toast });
+  // A bot prep's layout rehearsal the server offers this host's browser (DESIGN §14, SP_BOT_REHEARSAL=host on the
+  // server): a same-origin module Worker simulates the candidates off the main thread and answers with its pick; a
+  // browser that cannot run one answers `error` and the server rehearses itself. Nothing happens while the server
+  // does not delegate. A gameplay-plugin room is never offered (the server keeps that rehearsal).
+  rehearsal = installRehearsal({ net });
   net.attachBrowserHooks();
   // Audio: unlock on first gesture, BGM follows the route / match phase (js/audio.js).
   // a cosmetic plugin's sound that will not load falls back like its art (content.js, DESIGN §32 P1a)
   installAudio({ getManifest: () => data.get('assets'), subscribe: store.subscribe, getState: store.get, selectRoute, settings: settingsStore.get(),
     onFailed: (url) => cosmetics.fail(url) });
+  // …and the music follows the art: the screen's track again when the cosmetic layers change its URLs
+  cosmetics.subscribe(() => audio.refreshBgm());
   data.load('assets').catch(() => {});
   // Warm the data cache in the background (missing files are tolerated).
   data.loadAll('config').catch(() => {});
