@@ -30,7 +30,11 @@ import { RuntimeCache } from './runtimeCache.js';
 import { serveMedia } from './media.js';
 import { createPackRegistry } from '../packs.js';
 import { PACKS_URL, PACK_INDEX_FILE } from '../../shared/packs.js';
-import { PLUGINS_URL } from '../../shared/plugins/manifest.js';
+import { PLUGINS_URL, isPluginId, isPackPath, extOf } from '../../shared/plugins/manifest.js';
+import { PLUGIN_FILES_URL, VISUAL_SETS_URL, VISUAL_DOC_FILE, FILE_URL_DIGITS, VS_URL_DIGITS, PLUGIN_AUDIO_EXTS } from '../../shared/plugins/visual.js';
+import { UI_FRAME_CSP } from '../../shared/plugins/ui.js';
+import { createVisualSets } from '../plugins/visualSet.js';
+import { statIdentity, sameIdentity } from '../plugins/registry.js';
 import { APP_VERSION } from '../../shared/constants.js';
 
 /** Browser stand-in of server/data.js, served at /data.js (see the header). Served byte for byte: its first line names the entry, server/index.js. */
@@ -61,6 +65,9 @@ const EMPTY_LOCAL_ART = Buffer.from(JSON.stringify({ version: 1, source: 'none',
  */
 export function createStaticHandler({ publicDir, dataDir, sharedDir, simDir = path.join(ROOT, 'server', 'sim'), packsDir = path.join(ROOT, 'packs'), packs = null, plugins = null, runtimeCache, log = noopLog }) {
   const registry = packs || createPackRegistry({ publicDir, dataDir, packsDir }, { log: /** @type {any} */ (log) });
+  // the visual sets (DESIGN §32 P1a): builds a set's composition document (/vs/<vs16>/overlay.json) and resolves a cosmetic /
+  // ui plugin's file at /p/<id>/<hash8>/<rel>. A registry of 0.2.0's shape has no pluginFile → null → /vs/ and /p/ 404.
+  const sets = plugins && typeof plugins.pluginFile === 'function' ? createVisualSets({ registry: plugins, log }) : null;
   const mounts = [
     { prefix: '/data/', name: 'data', dir: path.resolve(dataDir) },
     { prefix: '/shared/', name: 'shared', dir: path.resolve(sharedDir) },
@@ -112,6 +119,39 @@ export function createStaticHandler({ publicDir, dataDir, sharedDir, simDir = pa
       const st = abs ? await fsp.stat(abs).catch(() => null) : null;
       if (!st || !st.isFile()) { sendError(req, res, 404, '页面不存在 · Not found', decoded.length <= 200 ? decoded : ''); return; }
       await serveFile(req, res, abs, st, 'plugins', parts, query, gzipCache, log);
+      return;
+    }
+    // Visual sets (server/plugins/visualSet.js): a set's composition and writes (DESIGN §32 P1a) at /vs/<vs16>/overlay.json
+    if (decoded.startsWith(VISUAL_SETS_URL)) {
+      const m = new RegExp(`^${VISUAL_SETS_URL}([0-9a-f]{${VS_URL_DIGITS}})/${VISUAL_DOC_FILE.replace('.', '\\.')}$`).exec(decoded);
+      const doc = m && sets ? await sets.doc(m[1]) : null;
+      if (!doc) { sendError(req, res, 404, '页面不存在 · Not found', decoded.length <= 200 ? decoded : ''); return; }
+      await serveBuffer(req, res, doc.body, { type: MIME['.json'], tag: doc.hash, cacheControl: 'no-cache', cache: gzipCache });
+      return;
+    }
+    // A cosmetic plugin's overlay files, or a ui plugin's frame files, at the hash of their bytes (see the header)
+    if (decoded.startsWith(PLUGIN_FILES_URL)) {
+      const [id, hash, ...segments] = decoded.slice(PLUGIN_FILES_URL.length).split('/');
+      const rel = segments.join('/');
+      const ok = isPluginId(id) && new RegExp(`^[0-9a-f]{${FILE_URL_DIGITS}}$`).test(hash || '') && segments.length > 0 && isPackPath(rel)
+        && !segments.some((x) => x === '' || x === '.' || x === '..' || x.startsWith('.'));
+      let f = ok && sets ? sets.file(id, rel) : null;
+      // extension-less audio (download managers: shared/media.js): the listed audio file of that name — the one whose hash
+      // the URL names when there are two
+      if (!f && ok && sets && !extOf(rel)) {
+        const found = PLUGIN_AUDIO_EXTS.map((e) => sets.file(id, rel + e)).filter(Boolean);
+        f = found.find((x) => (x.urlHashes ? x.urlHashes.has(hash) : x.sha256.slice(0, FILE_URL_DIGITS) === hash)) || found[0] || null;
+      }
+      // a symbolic link put in a file's place is never followed (wherever it leads), nor one in place of a folder on the way
+      const st = f ? await fsp.lstat(f.abs).catch(() => null) : null;
+      const real = st && st.isFile() ? await fsp.realpath(f.abs).catch(() => null) : null;
+      if (!st || !st.isFile() || !real || real !== f.real) { sendError(req, res, 404, '页面不存在 · Not found', decoded.length <= 200 ? decoded : ''); return; }
+      // still the bytes that were hashed: same size/mtime/inode/ctime → immutable; else the current file goes out with no-cache
+      const same = sameIdentity(statIdentity(st), f);
+      if (!same) sets.noteChanged();
+      // a ui plugin's /p/ frame file carries the frame CSP (sandbox: allow-scripts, no allow-same-origin)
+      if (f.frame) res.setHeader('Content-Security-Policy', UI_FRAME_CSP);
+      await serveFile(req, res, f.abs, st, 'plugins', segments, query, gzipCache, log);
       return;
     }
     // Extension-less audio (download-manager avoidance): /media/bgm/act1 → /assets/audio/bgm/act1.mp3
