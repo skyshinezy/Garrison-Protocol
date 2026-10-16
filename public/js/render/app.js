@@ -163,6 +163,7 @@ import { pieceDirOf, pickUnitOf } from './app/pick.js';
 import { CAMERA_MS, BOARD3D_STABLE_MS, BOARD3D_RETRY_MS, PEN_CAMERA_MS, RANGE_GROUPS, LEADER_HIT_STYLE, DRAG_HOLD_TILES, CHAIN_KINDS, DROP_PENDING_MS, DEPLOY_REPLAY_MS } from './app/tune.js';
 import { boardPreference, switchableBox, bandFor, fieldRows, boardArea, viewKind, restView, flightView } from './app/view.js';
 import { renderInfo, FORCED_EXIT, showsDeathFx } from './app/info.js';
+import { skinsStore } from '../ui/skins.js';
 import { resolveAssets, makeData, withTimeout, QUALITY_RES, BOARD_RES, releaseGl } from './app/host.js';
 import { t } from '../../../shared/i18n.js';
 
@@ -912,11 +913,14 @@ export async function createFieldView(host, options = {}) {
     // The 外勤医疗 reserve medic is visible before battle and can be inspected, but is not a movable board piece.
     // Keep its original board-space record for the detail card/range; only the rendered view is transformed to the
     // displayed boss half. The partner's units already use field coordinates and are not own prep map characters.
+    const skinMap = skinsStore.get().entries;
     prepMapChars = Array.isArray(src.prepMapChars) ? src.prepMapChars.map((u) => {
       if (!u || !Number.isInteger(u.uid) || !Number.isInteger(u.x) || !Number.isInteger(u.y)) return null;
       const p = prepXf.toDisp(u.y, u.x);
       const dir = prepXf.dirToDisp(u.dir);
-      return { unit: u, display: { ...u, x: p.col, y: p.row, dir, facing: dir === 'LEFT' ? -1 : 1 } };
+      const sid = u.chessId || u.charId;
+      const skin = sid ? skinMap[sid] : undefined;
+      return { unit: u, display: { ...u, x: p.col, y: p.row, dir, facing: dir === 'LEFT' ? -1 : 1, skin: skin || u.skin } };
     }).filter(Boolean) : [];
     const mate = prepXf.kind === 'bossPrep' && src.bossMate && Array.isArray(src.bossMate.units) ? src.bossMate.units : [];
     syncReadOnlyPrepUnits([...prepMapChars.map((e) => e.display), ...mate]);
