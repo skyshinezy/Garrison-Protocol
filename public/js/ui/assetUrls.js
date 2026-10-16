@@ -32,10 +32,21 @@ export function chessAvatarUrl(m, chess) {
  * @param {any} m
  * @param {any} chess
  */
-export function chessPortraitUrl(m, chess) {
+export function chessPortraitUrl(m, chess, opts) {
   const chars = obj(obj(m)?.chars);
-  const id = str(chess?.assets?.portrait);
   if (!chars) return null;
+  const skinId = opts && str(opts.skin);
+  const baseId = chess?.charId;
+  // 已选皮肤立绘优先于默认阶段立绘 (docs/SKINS.md)
+  if (skinId && baseId) {
+    const rec = chars[baseId];
+    const skins = rec && rec.skins;
+    if (skins) {
+      const skin = obj(skins)[skinId];
+      if (skin && str(skin.avatar)) return str(skin.avatar);
+    }
+  }
+  const id = str(chess?.assets?.portrait);
   if (id) {
     if (id.endsWith('_2')) {
       const base = chars[id.slice(0, -2)];
