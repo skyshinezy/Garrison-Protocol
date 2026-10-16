@@ -773,6 +773,7 @@ export async function createFieldView(host, options = {}) {
       kind: 'op', side: 'ally', defId: piece.id,
       spine: rec?.assets?.spine || rec?.charId || null, avatar: rec?.assets?.avatar || rec?.charId || null,
       tier: chess?.tier || piece.tier || 1, golden: !!(piece.golden || chess?.isGolden), dir,
+      skin: typeof piece.skin === 'string' ? piece.skin : null,
       ...(si ? { standInFor: si.standInFor } : null),
       ...(dr ? { diy: { charId: pick.charId, skillIndex: pick.skillIndex ?? null, uniEquipId: pick.uniEquipId ?? null } } : null),
     };
