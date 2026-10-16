@@ -34,6 +34,7 @@
 
 import { APP_VERSION } from './constants.js';
 import { SOURCE_LANG, canonicalLang, isLangCode, languageName, langFields } from './i18nPacks.js';
+import { makeIssue } from './plugins/errors.js';
 
 export const PACK_INDEX_VERSION = 1;
 /** A folder pack's manifest file. */
@@ -171,6 +172,9 @@ export function normalizeManifest(raw, ctx) {
   const out = {
     id, type, name: str(m.name, 60), englishName: str(m.englishName, 60), version: str(m.version, 40), app: range, compatible,
     authors, credits: str(m.credits, 500), license: str(m.license, 100), files: {},
+    // requires: a plugin's dependencies (id → version range); absent for language packs and cosmetic-only plugins (v0.3.0
+    // registry.js iterates it at scan time, so it must always be an object — DESIGN §32 P1c).
+    requires: isObj(m.requires) ? m.requires : {},
   };
   if (type === 'lang') {
     const code = ctx.lang || canonicalLang(m.lang);
@@ -200,7 +204,14 @@ export function normalizeManifest(raw, ctx) {
     }
     for (const role of Object.keys(given)) if (!kind.files[role]) warnings.push(`"files.${role}" is not a role of a ${type} pack (ignored)`);
   }
-  return { manifest: problems.length ? null : out, problems, warnings };
+  // the plain `problems` / `warnings` strings stay (server/packs.js, the tests read them); the structured `issues`
+  // are what the plugin registry (server/plugins/registry.js) consumes — an issue carries a level and the
+  // bilingual text the log and the studio render (shared/plugins/errors.js).
+  const issues = [
+    ...problems.map((t) => makeIssue('problem', 'PLUGIN_MANIFEST', t)),
+    ...warnings.map((t) => makeIssue('warning', 'PLUGIN_MANIFEST', t)),
+  ];
+  return { manifest: problems.length ? null : out, problems, warnings, issues };
 }
 
 // ---- the index ----------------------------------------------------------------------------------------------------
