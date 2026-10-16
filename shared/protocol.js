@@ -28,6 +28,11 @@ const isMap = (v, max, key, val) => {
   return true;
 };
 const isList = (v, max, item) => Array.isArray(v) && v.length <= max && v.every(item);
+// Plugin / content-hash validators (v0.3.0 DESIGN §32). Inlined — not imported from shared/plugins/* — so this file stays
+// free of the plugin runtime's heavier shared dependencies; the regexes match shared/plugins/{identity,manifest}.js exactly.
+const isScalar = (v) => isStr(v, 64) || isNum(v) || isBool(v);
+const isContentHash = (v) => typeof v === 'string' && /^[0-9a-f]{64}$/.test(v);
+const isPluginId = (v) => typeof v === 'string' && /^[a-z0-9][a-z0-9-]{1,31}$/.test(v);
 
 // A viewed group never grants authority: Match derives the player's own group, then checks these optional guards.
 const draftScope = { draftId: isId, groupId: (v) => isInt(v, 1, 5) };
@@ -430,6 +435,14 @@ export const C2S = {
   // 自选编队 (0.2.0 DIY): the player's DIY slot picks; stored per session / seat like room.ownership (a match takes the
   // picks its seat had when it started; during a match they are stored for the next one: ROOM_STARTED)
   'room.diy': { picks: isDiyPicks },
+  // the room's plugins (DESIGN §32, P1a; host, before the match): the plugins of this server the room switches on
+  // (shared/plugins/order.js closes the set over their requirements). [] = the original content. Cosmetic plugins
+  // (art: the room's visual set) and content plugins (gameplay) — room.state.content names the set.
+  'room.setPlugins': { plugins: (v) => isList(v, 32, (p) => isPlain(p) && isPluginId(p.id)
+    && (p.settings === undefined || isMap(p.settings, 32, (k) => isStr(k, 32), isScalar))) },
+  'room.setMode': { modeId: isId },
+  'room.consent': { cs: isContentHash, accept: isBool },
+  'room.contentReady': { cs: isContentHash, ok: isBool, $optional: ['ok'] },
   // 干员皮肤 (docs/SKINS.md): a plain { [chessId]: skinId } map mirrored from the client's localStorage; accepted
   // until the match leaves INFO_CHECK — during a match it is stored for the next one (ROOM_STARTED). The server keeps the
   // entries whose chess it recognises (freezeSkins) and drops the rest; an unknown skinId is harmless.
@@ -495,7 +508,7 @@ export const C2S = {
     leaksBy: (v) => isMap(v, RESULT_LIMITS.players, isId, (x) => isNum(x, 0, 1e6)),
     $optional: ['resolved', 'leaks', 'bossDmg', 'by', 'done', 'left', 'leaksBy'],
   },
-  'b.result': { battleId: isId, result: isBattleResult },
+  'b.result': { battleId: isId, result: isBattleResult, cs: isContentHash, $optional: ['cs'] },
   // A result too large for the socket (or beyond the result list caps) is re-simulated by the server instead.
   'b.yield': { battleId: isId },
 };
