@@ -132,3 +132,18 @@
 .minfo-dlg .brief-banned__grid .uthumb { --ut: max(.6rem, 34px); }
 .minfo-dlg .brief-banned__diy { font-size: max(.14rem, 12px); }
 .minfo-dlg .t-dim { font-size: max(.16rem, 10px); }
+
+/* ---- 固定卡池分组（移植自 feat）：A–E 组标、组内边框、决策顺序组徽、跨组已选标记 ---- */
+.draft-order__group { position: relative; display: flex; flex: none; flex-direction: column; gap: .1rem; }
+.draft-order__group--framed { gap: .06rem; padding: .04rem;
+  border: 1px solid var(--pool-group-color); border: 1px solid color-mix(in srgb, var(--pool-group-color) 38%, transparent);
+  background: transparent; background: color-mix(in srgb, var(--pool-group-color) 4%, transparent); }
+.dorder__group-badge { position: absolute; left: 0; bottom: 0; z-index: 2; display: grid; place-items: center;
+  min-width: max(.18rem, 12px); height: max(.18rem, 12px); font: 700 max(.12rem, 9px)/1 var(--font-num);
+  color: #101719; background: var(--pool-group-color); border: 1px solid rgba(8, 11, 10, .8); }
+.dband__groups { position: absolute; right: .03rem; top: .09rem; display: flex; flex-direction: column; gap: max(.02rem, 1px); pointer-events: none; }
+.dband__group { display: grid; place-items: center; width: max(.15rem, 9px); height: max(.15rem, 9px);
+  font: 700 max(.11rem, 8px)/1 var(--font-num); color: var(--pool-group-color); border: 1px solid var(--pool-group-color);
+  background: #0b100e; background: color-mix(in srgb, var(--pool-group-color) 15%, #0b100e); }
+.draft-grid--grouped .dband .bandicon { width: min(1.1rem, calc(100% - max(.15rem, 9px))); height: auto; aspect-ratio: 1; align-self: flex-start; }
+.draft-grid--grouped .dband__who { right: max(.22rem, 13px); }
